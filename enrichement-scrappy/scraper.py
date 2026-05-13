@@ -79,8 +79,13 @@ class BusinessScraper:
         chrome_options.add_argument('--log-level=3') # Réduire la verbosité des logs Chrome
         
         try:
-            logger.info("Lancement de Undetected Chromedriver...")
+            logger.info("Telechargement du driver via webdriver-manager...")
+            from webdriver_manager.chrome import ChromeDriverManager
+            driver_path = ChromeDriverManager().install()
+            
+            logger.info(f"Lancement de Undetected Chromedriver avec le binaire : {driver_path}")
             self.driver = uc.Chrome(
+                driver_executable_path=driver_path,
                 options=chrome_options,
                 headless=self.headless,
                 use_subprocess=True,
