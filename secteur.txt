@@ -1,0 +1,13 @@
+hotel 
+camping 
+auberge 
+restaurant 
+boulangerie
+pharmacie 
+camping 
+auberge 
+agriculteurs
+elevages
+pepiniere 
+jardinerie 
+ateliers

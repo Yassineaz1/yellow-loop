@@ -1,0 +1,7 @@
+__pycache__/
+*.csv
+*.log
+.DS_Store
+*.pyc
+.env
+debug_selenium.html

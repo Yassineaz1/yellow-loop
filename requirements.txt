@@ -1,0 +1,6 @@
+selenium
+beautifulsoup4
+webdriver-manager
+requests==2.31.0
+lxml==4.9.3
+undetected-chromedriver
