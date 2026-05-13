@@ -84,7 +84,7 @@ class BusinessScraper:
                 options=chrome_options,
                 headless=self.headless,
                 use_subprocess=True,
-                version_main=146
+                version_main=148
             )
             self.driver.set_page_load_timeout(30)
             
