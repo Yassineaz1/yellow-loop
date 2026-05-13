@@ -44,7 +44,7 @@ Clonons directement le dépôt GitHub :
 
 ```bash
 cd ~
-git clone https://github.com/<VOTRE_NOM_UTILISATEUR>/yellow-loop.git
+git clone https://github.com/Yassineaz1/yellow-loop.git
 cd yellow-loop
 ```
 
