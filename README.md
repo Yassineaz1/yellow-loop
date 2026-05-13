@@ -1,116 +1,114 @@
-# 🚀 Déploiement du Scraper sur VPS Debian/Ubuntu
+# Yellow Loop
 
-Ce guide détaille toutes les étapes pour configurer un VPS (Debian 11/12 ou Ubuntu), installer les dépendances nécessaires pour Selenium, et lancer le scraper pour qu'il tourne en arrière-plan sans interruption.
+Yellow Loop is an automated, end-to-end data extraction and enrichment pipeline designed to aggregate professional contact data and legal information. 
+
+## Project Overview
+
+The primary goal of this tool is to generate high-quality, actionable B2B lead files based on a given geographical department and specific business sectors. The pipeline operates autonomously through a sequence of interconnected scripts that scrape, enrich, and sanitize the data.
+
+### Pipeline Architecture
+
+The execution follows a strict 4-step process:
+
+1. **Initial Scraping (`scraper.py`)**
+   - Reads target sectors from `secteur.txt`.
+   - Navigates the PagesJaunes directory to extract base information: Company Name, Activity, Phone Number, Address, and Detailed URL.
+   - Bypasses basic bot protections and handles dynamic DOM rendering for hidden phone numbers.
+
+2. **Legal Information Enrichment (`enrichement-scrappy/scraper.py`)**
+   - Visits each previously extracted Detailed URL.
+   - Scrapes the B2B/Legal section to retrieve the SIRET, SIREN, NAF Code, Legal Form, and Creation Date.
+
+3. **Executive Enrichment (`enrichement-scrappy/dirigeant.py`)**
+   - Connects to Pappers.fr using the extracted SIREN/SIRET.
+   - Parses the legal documentation to identify and extract the names of the company's executives (Dirigeants).
+
+4. **Data Sanitization (`enrichement-scrappy/cleaner.py`)**
+   - Filters out incomplete entries (e.g., missing phone numbers or invalid executive names).
+   - Standardizes phone number formats.
+   - Outputs a clean, final CSV file named automatically after the targeted department (e.g., `67.csv`).
 
 ---
 
-## 🛠️ 1. Connexion initiale au VPS
+## Local Installation
 
-Ouvrez un terminal sur votre ordinateur local (ou PuTTY sur Windows) et connectez-vous au serveur :
+### Prerequisites
+- Python 3.8+
+- Google Chrome installed on the host machine
 
+### Setup
+Clone the repository and install the required dependencies:
 ```bash
-ssh root@<IP_DE_VOTRE_VPS>
+git clone https://github.com/Yassineaz1/yellow-loop.git
+cd yellow-loop
+pip install -r requirements.txt
 ```
 
-Une fois connecté, mettez à jour la machine :
+### Usage
+Define your target sectors (one per line) in `secteur.txt`.
+Run the main script:
+```bash
+python scraper.py
+```
+When prompted, enter the target department number. The pipeline will then execute all 4 steps sequentially.
+
+---
+
+## Server Deployment (Debian/Ubuntu VPS)
+
+The tool is configured for headless execution on a remote Linux server, utilizing `webdriver-manager` and strict memory management arguments.
+
+### 1. Server Preparation
+Update your server and install the necessary system packages:
 ```bash
 apt update && apt upgrade -y
+apt install python3 python3-pip wget curl unzip tmux -y
 ```
 
----
-
-## 📦 2. Installation des dépendances systèmes
-
-Le scraper a besoin de Python, de Google Chrome et de quelques autres outils pour tourner en mode "Headless".
-
-**A. Installez les outils de base et Python :**
-```bash
-apt install wget curl unzip python3 python3-pip tmux -y
-```
-
-**B. Installez Google Chrome officiel :**
+Install the stable version of Google Chrome:
 ```bash
 wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 apt install -y ./google-chrome-stable_current_amd64.deb
 rm google-chrome-stable_current_amd64.deb
 ```
 
----
-
-## 📂 3. Récupération du code sur le VPS
-
-Vous n'avez plus besoin de transférer les fichiers manuellement via FileZilla.
-Clonons directement le dépôt GitHub :
-
+### 2. Repository Setup
+Clone the repository in your working directory:
 ```bash
 cd ~
 git clone https://github.com/Yassineaz1/yellow-loop.git
 cd yellow-loop
-```
-
-L'architecture est maintenant unifiée et autonome :
-```text
-~/yellow-loop/
-├── scraper.py
-├── secteur.txt
-├── requirements.txt
-└── enrichement-scrappy/
-    ├── scraper.py
-    ├── dirigeant.py
-    └── cleaner.py
-```
-
----
-
-## 🐍 4. Installation des dépendances Python
-
-Installez toutes les dépendances requises d'un seul coup :
-
-```bash
 pip3 install -r requirements.txt
 ```
 
----
+### 3. Background Execution (Tmux)
+To ensure the script continues running after closing the SSH connection, use a virtual session.
 
-## 🚀 5. Lancement du script en continu (avec Tmux)
-
-Pour que le script continue de tourner même si vous éteignez votre ordinateur, nous allons utiliser `tmux` (un terminal virtuel).
-
-**1. Créez une nouvelle session virtuelle nommée "scraper" :**
+Start a new session:
 ```bash
 tmux new -s scraper
 ```
 
-**2. Lancez le script :**
+Launch the pipeline:
 ```bash
 python3 scraper.py
 ```
-*Le script va vous demander d'entrer le numéro du département (ex: 67). Entrez-le et validez.*
 
-**3. Détachez-vous de la session pour laisser tourner :**
-Faites la combinaison clavier suivante :
-- Appuyez sur **`Ctrl` + `B`**
-- Relâchez les touches
-- Appuyez sur **`D`** (comme Detach)
+Detach from the session to leave it running in the background:
+Press `Ctrl + B`, then release and press `D`.
+You can now safely terminate your SSH connection.
 
-Vous revenez sur votre terminal principal. **Vous pouvez maintenant fermer votre fenêtre SSH (ou éteindre votre PC)**, le scraper tourne toujours sur le serveur !
-
----
-
-## 👀 6. Revenir voir l'avancement
-
-Si vous vous reconnectez plus tard à votre VPS et voulez voir où en est l'extraction, tapez simplement :
-
+To reattach and monitor the progress later:
 ```bash
 tmux attach -t scraper
 ```
 
-*Pour ressortir sans couper le script, refaites `Ctrl + B` puis `D`.*
+## Output Format
 
----
-
-## 📥 7. Récupérer les fichiers finaux
-
-Une fois le processus totalement terminé (Scraping initial + SIRET + Pappers + Nettoyage), le fichier nettoyé sera créé dans le dossier `enrichement-scrappy` sous le nom de votre département (ex: `67.csv`).
-
-Ouvrez **FileZilla / WinSCP**, connectez-vous au VPS, allez dans `/root/scraper/enrichement-scrappy/` et téléchargez le fichier CSV sur votre ordinateur !
+The final processed dataset is saved in `enrichement-scrappy/<department_number>.csv` and contains the following structured fields:
+- Nom de l'entreprise
+- Activité
+- Téléphone
+- Adresse / Code Postal / Ville / Département
+- SIRET / SIREN / Code NAF / Forme juridique
+- Nom_Dirigeant
