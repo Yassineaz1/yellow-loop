@@ -57,8 +57,11 @@ class PappersDirigeantScraper:
         try:
             driver_path = ChromeDriverManager().install()
             
-            # Correction pour WinError 193 si un fichier de licence est retourné à la place de l'exécutable
-            if not driver_path.lower().endswith('.exe'):
+            # Correction pour le binaire sur Windows vs Linux
+            import platform
+            is_windows = platform.system() == "Windows"
+            
+            if is_windows and not driver_path.lower().endswith('.exe'):
                 parent_dir = os.path.dirname(driver_path)
                 potential_exe = os.path.join(parent_dir, 'chromedriver.exe')
                 if os.path.exists(potential_exe):
@@ -241,12 +244,12 @@ class PappersDirigeantScraper:
         """Traite le CSV enrichi et ajoute les dirigeants"""
         if not os.path.exists(self.input_csv):
             logger.error(f"[ERREUR] Fichier {self.input_csv} introuvable!")
-            return
+            return False
         
         # Initialiser le navigateur
         if not self.setup_driver():
             logger.error("[ERREUR] Impossible d'initialiser le navigateur. Arret du script.")
-            return
+            return False
         
         try:
             # Lire le CSV avec détection automatique du délimiteur
@@ -346,6 +349,10 @@ class PappersDirigeantScraper:
                 logger.info(f"   {i}. {nom:42} | Dirigeant: {dirigeant}")
             
             logger.info(f"{'='*60}")
+            return True
+        except Exception as e:
+            logger.error(f"[ERREUR] Erreur critique lors du traitement: {e}")
+            return False
             
         finally:
             # Fermer le navigateur
@@ -418,10 +425,11 @@ def main():
             output_csv='output_final.csv',
             headless=headless
         )
-        scraper.process_csv()
+        return 0 if scraper.process_csv() else 1
         
     elif choix == "2":
         test_specific_siret()
+        return 0
     else:
         print("[ERREUR] Choix invalide. Lancement du mode complet...")
         scraper = PappersDirigeantScraper(
@@ -429,8 +437,9 @@ def main():
             output_csv='output_final.csv',
             headless=False
         )
-        scraper.process_csv()
+        return 0 if scraper.process_csv() else 1
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())

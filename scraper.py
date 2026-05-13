@@ -311,32 +311,59 @@ def scrape_pagesjaunes():
         print(f"❌ Le dossier {enrich_dir} est introuvable. L'enrichissement est annulé.")
         return
 
+    if not os.path.exists(output_file):
+        print(f"❌ Le fichier source {output_file} est introuvable. L'enrichissement est annulé.")
+        return
+
     # Copier le fichier raw vers input.csv
-    shutil.copy(output_file, input_enrich_csv)
-    print(f"✅ Fichier copié vers: {input_enrich_csv}")
+    try:
+        shutil.copy(output_file, input_enrich_csv)
+        print(f"✅ Fichier copié vers: {input_enrich_csv}")
+    except Exception as e:
+        print(f"❌ Erreur lors de la copie du fichier: {e}")
+        return
     
+    import sys
+    python_cmd = "python3" if os.name != 'nt' else "python"
+
     # Étape 1: Exécuter scraper.py pour obtenir les SIRET/SIREN
     print("\n[1/3] Récupération des informations légales (SIRET/SIREN)...")
     try:
-        # Note: on utilise python3 sur Linux !
-        subprocess.run(["python3", "scraper.py"], cwd=enrich_dir, input="1\n", text=True, check=True)
+        subprocess.run([python_cmd, "scraper.py"], cwd=enrich_dir, input="1\n", text=True, check=True)
+        
+        # Vérification
+        if not os.path.exists(os.path.join(enrich_dir, "output_enriched.csv")):
+            print("❌ Échec : 'output_enriched.csv' n'a pas été généré.")
+            return
     except Exception as e:
         print(f"⚠️ Erreur lors de l'exécution de scraper.py: {e}")
+        return
     
     # Étape 2: Exécuter dirigeant.py pour obtenir les noms des dirigeants
     print("\n[2/3] Recherche des noms des dirigeants sur Pappers...")
     try:
-        subprocess.run(["python3", "dirigeant.py"], cwd=enrich_dir, input="1\no\n", text=True, check=True)
+        subprocess.run([python_cmd, "dirigeant.py"], cwd=enrich_dir, input="1\no\n", text=True, check=True)
+        
+        # Vérification
+        if not os.path.exists(os.path.join(enrich_dir, "output_final.csv")):
+            print("❌ Échec : 'output_final.csv' n'a pas été généré.")
+            return
     except Exception as e:
         print(f"⚠️ Erreur lors de l'exécution de dirigeant.py: {e}")
+        return
     
     # Étape 3: Exécuter cleaner.py pour nettoyer et nommer le fichier final
     print("\n[3/3] Nettoyage et formatage final...")
     dept_file_name = f"{department}.csv"
     try:
-        subprocess.run(["python3", "cleaner.py"], cwd=enrich_dir, input=f"1\n{dept_file_name}\n", text=True, check=True)
-        print("\n🎉 PROCESSUS COMPLET TERMINÉ !")
-        print(f"📂 Le fichier final nettoyé a été créé : {os.path.join(enrich_dir, dept_file_name)}")
+        subprocess.run([python_cmd, "cleaner.py"], cwd=enrich_dir, input=f"1\n{dept_file_name}\n", text=True, check=True)
+        
+        final_output = os.path.join(enrich_dir, dept_file_name)
+        if os.path.exists(final_output):
+            print("\n🎉 PROCESSUS COMPLET TERMINÉ !")
+            print(f"📂 Le fichier final nettoyé a été créé : {final_output}")
+        else:
+            print(f"⚠️ Nettoyage terminé mais le fichier {dept_file_name} semble manquant.")
     except Exception as e:
         print(f"⚠️ Erreur lors de l'exécution de cleaner.py: {e}")
 

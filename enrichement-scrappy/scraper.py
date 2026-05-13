@@ -104,8 +104,7 @@ class BusinessScraper:
                 driver_executable_path=driver_path,
                 options=chrome_options,
                 headless=self.headless,
-                use_subprocess=True,
-                version_main=148
+                use_subprocess=True
             )
             self.driver.set_page_load_timeout(30)
             
@@ -436,12 +435,12 @@ class BusinessScraper:
         """Traite le CSV d'entrée et crée le CSV enrichi"""
         if not os.path.exists(self.input_csv):
             logger.error(f"❌ Fichier {self.input_csv} introuvable!")
-            return
+            return False
         
         # Initialiser le navigateur
         if not self.setup_driver():
             logger.error("❌ Impossible d'initialiser le navigateur. Arrêt du script.")
-            return
+            return False
         
         try:
             # Lire le CSV d'entrée
@@ -554,6 +553,10 @@ class BusinessScraper:
                 logger.info(f"  {i}. {nom:42} | SIRET: {siret:14} | SIREN: {siren:9}")
             
             logger.info(f"{'='*60}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Erreur critique lors du traitement: {e}")
+            return False
             
         finally:
             # Fermer le navigateur
@@ -631,10 +634,11 @@ def main():
             headless=headless
         )
         
-        scraper.process_csv()
+        return 0 if scraper.process_csv() else 1
     
     elif choix == "2":
         test_specific_url()
+        return 0
     
     else:
         print("Choix invalide. Lancement du mode complet...")
@@ -643,7 +647,8 @@ def main():
             output_csv='output_enriched.csv',
             headless=False  # Visible pour debug
         )
-        scraper.process_csv()
+        return 0 if scraper.process_csv() else 1
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())
