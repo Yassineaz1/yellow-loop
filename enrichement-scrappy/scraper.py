@@ -81,7 +81,23 @@ class BusinessScraper:
         try:
             logger.info("Telechargement du driver via webdriver-manager...")
             from webdriver_manager.chrome import ChromeDriverManager
-            driver_path = ChromeDriverManager().install()
+            import glob
+            
+            # ChromeDriverManager().install() peut retourner le mauvais fichier (THIRD_PARTY_NOTICES)
+            # On cherche manuellement le vrai binaire chromedriver dans le dossier téléchargé
+            raw_path = ChromeDriverManager().install()
+            driver_dir = os.path.dirname(raw_path)
+            
+            # Chercher le bon exécutable (chromedriver.exe sur Windows, chromedriver sur Linux)
+            candidates = glob.glob(os.path.join(driver_dir, "chromedriver*"))
+            driver_path = None
+            for c in candidates:
+                if os.path.isfile(c) and "NOTICES" not in c and "LICENSE" not in c:
+                    driver_path = c
+                    break
+            
+            if not driver_path:
+                raise FileNotFoundError(f"Impossible de trouver chromedriver dans {driver_dir}")
             
             logger.info(f"Lancement de Undetected Chromedriver avec le binaire : {driver_path}")
             self.driver = uc.Chrome(
