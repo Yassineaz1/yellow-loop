@@ -22,11 +22,11 @@ def random_sleep(min_s=2, max_s=5):
 
 def setup_driver():
     chrome_options = Options()
-    # Options obligatoires pour Linux / VPS
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")  # Important pour Linux/VPS
-    chrome_options.add_argument("--disable-dev-shm-usage")  # Évite les crashes mémoire
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
+    if os.name != "nt":  # Linux/VPS uniquement
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
     
     # Options pour passer inaperçu
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -45,10 +45,19 @@ def setup_driver():
     }
     chrome_options.add_experimental_option('prefs', prefs)
     
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=chrome_options
-    )
+    try:
+        # Selenium Manager (Selenium 4.6+) — détecte l'OS automatiquement
+        driver = webdriver.Chrome(options=chrome_options)
+    except Exception:
+        # Fallback : webdriver-manager avec nettoyage du cache
+        import shutil, os
+        cache_dir = os.path.join(os.path.expanduser("~"), ".wdm")
+        if os.path.exists(cache_dir):
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=chrome_options
+        )
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     return driver
 
@@ -162,31 +171,61 @@ def scrape_pagesjaunes():
                         break
                     
                     sel_items = driver.find_elements(By.CSS_SELECTOR, "li.bi")
+                    def decode_pjlb(element):
+                        try:
+                            pj_data = json.loads(element['data-pjlb'])
+                            url_b64 = pj_data.get("url")
+                            if url_b64:
+                                return "https://www.pagesjaunes.fr" + base64.b64decode(url_b64).decode("utf-8")
+                        except:
+                            pass
+                        return ""
+
+                    def href_to_url(href):
+                        if not href:
+                            return ""
+                        if href.startswith('/'):
+                            return "https://www.pagesjaunes.fr" + href
+                        if href.startswith('http'):
+                            return href
+                        return ""
+
                     page_data = []
                     for i, item_soup in enumerate(items):
                         try:
                             # Extraction Nom
                             raw_name_tag = item_soup.select_one("h3, .bi-denomination")
                             nom = raw_name_tag.get_text(strip=True) if raw_name_tag else ""
-                            
+
                             # Extraction Lien détaillé (pour enrichment-scrappy)
                             lien_detaille = ""
+
+                            # Stratégie 1 : a.bi-denomination (ancienne structure)
                             a_tag = item_soup.select_one("a.bi-denomination")
+                            # Stratégie 2 : ancre dans h3.bi-denomination
+                            if not a_tag:
+                                h3 = item_soup.select_one("h3.bi-denomination, .bi-denomination")
+                                if h3:
+                                    a_tag = h3.find("a")
+                            # Stratégie 3 : n'importe quel lien vers /pros/
+                            if not a_tag:
+                                a_tag = item_soup.select_one("a[href*='/pros/']")
+                            # Stratégie 4 : liens denomination génériques
+                            if not a_tag:
+                                a_tag = item_soup.select_one(".denomination-links a, .bi-header a, .title a")
+
                             if a_tag:
-                                href = a_tag.get('href', '')
-                                if href:
-                                    if 'data-pjlb' in a_tag.attrs:
-                                        try:
-                                            pj_data = json.loads(a_tag['data-pjlb'])
-                                            url_b64 = pj_data.get("url")
-                                            if url_b64:
-                                                decoded_path = base64.b64decode(url_b64).decode("utf-8")
-                                                lien_detaille = "https://www.pagesjaunes.fr" + decoded_path
-                                        except: pass
-                                    elif href.startswith('/'):
-                                        lien_detaille = "https://www.pagesjaunes.fr" + href
-                                    else:
-                                        lien_detaille = href
+                                if 'data-pjlb' in a_tag.attrs:
+                                    lien_detaille = decode_pjlb(a_tag)
+                                if not lien_detaille:
+                                    lien_detaille = href_to_url(a_tag.get('href', ''))
+
+                            # Stratégie 5 : chercher data-pjlb sur n'importe quel élément du bloc
+                            if not lien_detaille:
+                                for elem in item_soup.select("[data-pjlb]"):
+                                    lien_detaille = decode_pjlb(elem)
+                                    if lien_detaille:
+                                        break
                             
                             # Extraction Activité
                             activity_tag = item_soup.select_one(".bi-activity-unit")
@@ -232,6 +271,13 @@ def scrape_pagesjaunes():
                         except Exception as e: 
                             print(f"    ⚠️ Erreur extraction item: {e}")
                     
+                    # Diagnostic : compter les liens trouvés
+                    links_found = sum(1 for r in page_data if r.get("Lien détaillé"))
+                    if links_found == 0 and page_data:
+                        print(f"    ⚠️ ATTENTION : 0/{len(page_data)} liens détaillés trouvés sur cette page — structure HTML peut-être changée")
+                    else:
+                        print(f"    🔗 {links_found}/{len(page_data)} liens détaillés trouvés")
+
                     # Save page results immediately to CSV
                     if page_data:
                         is_empty = not os.path.exists(output_file) or os.stat(output_file).st_size == 0
