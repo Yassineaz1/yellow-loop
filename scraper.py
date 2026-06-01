@@ -50,7 +50,6 @@ def setup_driver():
         driver = webdriver.Chrome(options=chrome_options)
     except Exception:
         # Fallback : webdriver-manager avec nettoyage du cache
-        import shutil, os
         cache_dir = os.path.join(os.path.expanduser("~"), ".wdm")
         if os.path.exists(cache_dir):
             shutil.rmtree(cache_dir, ignore_errors=True)
