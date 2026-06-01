@@ -196,36 +196,26 @@ def scrape_pagesjaunes():
                             raw_name_tag = item_soup.select_one("h3, .bi-denomination")
                             nom = raw_name_tag.get_text(strip=True) if raw_name_tag else ""
 
-                            # Extraction Lien détaillé (pour enrichment-scrappy)
+                            # ── LIEN DÉTAILLÉ ──────────────────────────────────────
+                            # Stratégie 0 : id du li.bi = "bi-XXXXXXXX" → URL propre /pros/XXXXXXXX
                             lien_detaille = ""
+                            li_id = item_soup.get('id', '')
+                            if li_id.startswith('bi-'):
+                                epj = li_id[3:]
+                                if epj.isdigit():
+                                    lien_detaille = f"https://www.pagesjaunes.fr/pros/{epj}"
 
-                            # Stratégie 1 : a.bi-denomination (ancienne structure)
-                            a_tag = item_soup.select_one("a.bi-denomination")
-                            # Stratégie 2 : ancre dans h3.bi-denomination
-                            if not a_tag:
-                                h3 = item_soup.select_one("h3.bi-denomination, .bi-denomination")
-                                if h3:
-                                    a_tag = h3.find("a")
-                            # Stratégie 3 : n'importe quel lien vers /pros/
-                            if not a_tag:
-                                a_tag = item_soup.select_one("a[href*='/pros/']")
-                            # Stratégie 4 : liens denomination génériques
-                            if not a_tag:
-                                a_tag = item_soup.select_one(".denomination-links a, .bi-header a, .title a")
-
-                            if a_tag:
-                                if 'data-pjlb' in a_tag.attrs:
-                                    lien_detaille = decode_pjlb(a_tag)
-                                if not lien_detaille:
-                                    lien_detaille = href_to_url(a_tag.get('href', ''))
-
-                            # Stratégie 5 : chercher data-pjlb sur n'importe quel élément du bloc
+                            # Fallback : a.bi-denomination href ou data-pjlb
                             if not lien_detaille:
-                                for elem in item_soup.select("[data-pjlb]"):
-                                    lien_detaille = decode_pjlb(elem)
-                                    if lien_detaille:
-                                        break
-                            
+                                a_tag = item_soup.select_one("a.bi-denomination")
+                                if not a_tag:
+                                    a_tag = item_soup.select_one("a[href*='/pros/']")
+                                if a_tag:
+                                    if 'data-pjlb' in a_tag.attrs:
+                                        lien_detaille = decode_pjlb(a_tag)
+                                    if not lien_detaille:
+                                        lien_detaille = href_to_url(a_tag.get('href', ''))
+
                             # Extraction Activité
                             activity_tag = item_soup.select_one(".bi-activity-unit")
                             activite = activity_tag.get_text(strip=True) if activity_tag else secteur
@@ -236,25 +226,66 @@ def scrape_pagesjaunes():
                             if "Voir le plan" in raw_addr:
                                 raw_addr = raw_addr.replace("Voir le plan", "").strip()
                             addr, cp, ville = parse_address(raw_addr)
-                            
-                            # Extraction Téléphone
+
+                            # ── TÉLÉPHONE ──────────────────────────────────────────
+                            # Structure réelle PagesJaunes : div.bi-fantomas > div.number-contact
+                            # Numéro arcep : div.bi-fantomas .num-arcep
                             phone = ""
-                            phone_tags = item_soup.select(".number-contact, .num")
-                            if phone_tags:
-                                phone = "; ".join([p.get_text(strip=True).replace("Tél :", "").strip() for p in phone_tags])
-                            
-                            # Clic sur le bouton d'appel si le téléphone n'est pas visible
+
+                            # Format arcep (numéro surtaxé)
+                            arcep = item_soup.select_one(".bi-fantomas .num-arcep, .bi-fantomas .num.num-arcep")
+                            if arcep:
+                                phone = arcep.get_text(strip=True)
+
+                            # Format standard : texte direct dans .number-contact
+                            if not phone:
+                                nc = item_soup.select_one(".bi-fantomas .number-contact, .number-contact")
+                                if nc:
+                                    raw_phone = nc.get_text(strip=True)
+                                    # Extraire uniquement le numéro (regex numéro français)
+                                    m = re.search(r'(\d[\d\s\.\-]{6,14}\d)', raw_phone)
+                                    if m:
+                                        phone = m.group(1).strip()
+
+                            # Fallback : lien tel:
+                            if not phone:
+                                tel_link = item_soup.select_one("a[href^='tel:']")
+                                if tel_link:
+                                    phone = tel_link['href'].replace("tel:", "").strip()
+
+                            # Fallback clic bouton si toujours rien
                             if not phone and i < len(sel_items):
                                 try:
-                                    btn = sel_items[i].find_elements(By.CSS_SELECTOR, "button.btn_tel")
+                                    btn_selectors = [
+                                        "button.btn_tel", "button[class*='btn_tel']",
+                                        "button[class*='tel']", "button[class*='phone']",
+                                    ]
+                                    btn = None
+                                    for sel in btn_selectors:
+                                        found = sel_items[i].find_elements(By.CSS_SELECTOR, sel)
+                                        if found:
+                                            btn = found[0]
+                                            break
                                     if btn:
-                                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn[0])
-                                        driver.execute_script("arguments[0].click();", btn[0])
+                                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                                        driver.execute_script("arguments[0].click();", btn)
                                         time.sleep(1.5)
-                                        phone_elem = sel_items[i].find_elements(By.CSS_SELECTOR, ".number-contact")
-                                        if phone_elem:
-                                            phone = phone_elem[0].text.replace("Tél :", "").strip()
-                                except: pass
+                                        # Après clic : chercher le tel: link ou .number-contact
+                                        updated_html = sel_items[i].get_attribute("outerHTML")
+                                        updated_soup = BeautifulSoup(updated_html, 'html.parser')
+                                        tel_after = updated_soup.select_one("a[href^='tel:']")
+                                        if tel_after:
+                                            phone = tel_after['href'].replace("tel:", "").strip()
+                                        else:
+                                            phone_elem = sel_items[i].find_elements(
+                                                By.CSS_SELECTOR,
+                                                ".number-contact, .numero, [class*='numero'], a[href^='tel:']"
+                                            )
+                                            if phone_elem:
+                                                raw = phone_elem[0].get_attribute("href") or phone_elem[0].text
+                                                phone = raw.replace("tel:", "").replace("Tél :", "").strip()
+                                except:
+                                    pass
                             
                             result = {
                                 "Nom de l'entreprise": nom,
@@ -270,12 +301,18 @@ def scrape_pagesjaunes():
                         except Exception as e: 
                             print(f"    ⚠️ Erreur extraction item: {e}")
                     
-                    # Diagnostic : compter les liens trouvés
+                    # Diagnostic : compter les liens et téléphones trouvés
                     links_found = sum(1 for r in page_data if r.get("Lien détaillé"))
-                    if links_found == 0 and page_data:
-                        print(f"    ⚠️ ATTENTION : 0/{len(page_data)} liens détaillés trouvés sur cette page — structure HTML peut-être changée")
+                    phones_found = sum(1 for r in page_data if r.get("Téléphone"))
+                    total_items = len(page_data)
+                    if links_found == 0 and total_items:
+                        print(f"    ⚠️ ATTENTION : 0/{total_items} liens — sélecteur HTML peut-être changé")
                     else:
-                        print(f"    🔗 {links_found}/{len(page_data)} liens détaillés trouvés")
+                        print(f"    🔗 {links_found}/{total_items} liens détaillés")
+                    if phones_found == 0 and total_items:
+                        print(f"    ⚠️ ATTENTION : 0/{total_items} téléphones — sélecteur HTML peut-être changé")
+                    else:
+                        print(f"    📞 {phones_found}/{total_items} téléphones trouvés")
 
                     # Save page results immediately to CSV
                     if page_data:
