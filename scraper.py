@@ -1,3 +1,10 @@
+"""
+Scraper PagesJaunes — module de collecte brute.
+
+Ce fichier N'orchestre plus rien : il expose `scrape_department()` qui scrape
+tous les secteurs d'UN département et écrit un CSV brut FRAIS (mode "w").
+L'orchestration (boucle départements, enrichissement, nettoyage, db/) est dans run.py.
+"""
 import time
 import csv
 import os
@@ -12,13 +19,15 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.action_chains import ActionChains
 from bs4 import BeautifulSoup
-import subprocess
 import shutil
+
+import config
+
 
 def random_sleep(min_s=2, max_s=5):
     time.sleep(random.uniform(min_s, max_s))
+
 
 def setup_driver():
     chrome_options = Options()
@@ -27,7 +36,7 @@ def setup_driver():
     if os.name != "nt":  # Linux/VPS uniquement
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
-    
+
     # Options pour passer inaperçu
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -36,15 +45,15 @@ def setup_driver():
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36')
     chrome_options.add_argument("--disable-infobars")
     chrome_options.add_argument("--disable-notifications")
-    chrome_options.add_argument('--log-level=3')  # Supprime les logs d'erreurs de Chrome
-    
+    chrome_options.add_argument('--log-level=3')
+
     # Disable images and stylesheets for speed
     prefs = {
         'profile.managed_default_content_settings.images': 2,
         'profile.managed_default_content_settings.stylesheets': 2,
     }
     chrome_options.add_experimental_option('prefs', prefs)
-    
+
     try:
         # Selenium Manager (Selenium 4.6+) — détecte l'OS automatiquement
         driver = webdriver.Chrome(options=chrome_options)
@@ -59,6 +68,7 @@ def setup_driver():
         )
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     return driver
+
 
 def handle_cookie_banner(driver):
     """Handles the cookie banner on PagesJaunes"""
@@ -79,7 +89,7 @@ def handle_cookie_banner(driver):
                     return True
             except:
                 driver.switch_to.default_content()
-        
+
         # Fallback for non-iframe banners
         accept_btn = driver.find_elements(By.ID, "appconsent-accept-all")
         if not accept_btn:
@@ -94,10 +104,11 @@ def handle_cookie_banner(driver):
         driver.switch_to.default_content()
     return False
 
+
 def parse_address(raw_addr):
     """Extracts (Address, Zip, City) from raw address string"""
-    if not raw_addr: return "", "", ""
-    # Example: '4 route Lion 14150 Ouistreham'
+    if not raw_addr:
+        return "", "", ""
     zip_match = re.search(r"\b(\d{5})\b", raw_addr)
     if zip_match:
         zip_code = zip_match.group(1)
@@ -107,35 +118,37 @@ def parse_address(raw_addr):
         return addr, zip_code, city
     return raw_addr, "", ""
 
-def scrape_pagesjaunes():
-    # Version Universelle - Trouve les dossiers relatifs à l'emplacement du script
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = base_dir
-    secteur_file = os.path.join(output_dir, "secteur.txt")
-    output_file = os.path.join(output_dir, "raw_results_pro.csv")
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
+
+def load_secteurs(secteur_file=None):
+    """Lit la liste des secteurs depuis secteur.txt."""
+    secteur_file = secteur_file or config.SECTEUR_FILE
     if not os.path.exists(secteur_file):
-        print(f"❌ Le fichier {secteur_file} est introuvable.")
-        return
-        
+        raise FileNotFoundError(f"Le fichier {secteur_file} est introuvable.")
     with open(secteur_file, "r", encoding="utf-8") as f:
         secteurs = [line.strip() for line in f if line.strip()]
-
     if not secteurs:
-        print("❌ Le fichier secteur.txt est vide.")
-        return
+        raise ValueError("Le fichier secteur.txt est vide.")
+    return secteurs
 
-    department = input("Veuillez entrer le département (ex: 67) : ")
-    print(f"🚀 Début du scraping pour {len(secteurs)} secteurs dans le département {department}...")
 
-    # Prepare CSV file with headers
-    keys = ["Nom de l'entreprise", "Activité", "Téléphone", "Adresse", "Code Postal", "Ville", "Département", "Lien détaillé"]
-    if not os.path.exists(output_file):
-        with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=keys)
-            writer.writeheader()
+def scrape_department(department, output_file, secteurs):
+    """
+    Scrape tous les `secteurs` pour un `department` donné et écrit un CSV brut FRAIS.
+
+    - `output_file` est TOUJOURS réinitialisé (mode "w") : aucune accumulation
+      des données d'un département précédent.
+    - Retourne le nombre total de lignes écrites.
+    """
+    keys = config.CSV_HEADERS
+
+    # Réinitialisation : on repart d'un fichier vide avec en-tête.
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+
+    total_rows = 0
+    print(f"🚀 Scraping de {len(secteurs)} secteurs dans le département {department}...")
 
     driver = setup_driver()
     try:
@@ -144,32 +157,33 @@ def scrape_pagesjaunes():
             driver.get("https://www.pagesjaunes.fr/")
             random_sleep(2, 4)
             handle_cookie_banner(driver)
-            
+
             try:
                 wait = WebDriverWait(driver, 10)
                 q_input = wait.until(EC.presence_of_element_located((By.ID, "quoiqui")))
                 o_input = driver.find_element(By.ID, "ou")
                 submit = driver.find_element(By.ID, "findId")
-                
+
                 q_input.clear()
                 q_input.send_keys(secteur)
                 o_input.clear()
                 o_input.send_keys(department)
                 random_sleep(0.5, 1.5)
                 driver.execute_script("arguments[0].click();", submit)
-                
+
                 page_num = 1
                 while True:
                     print(f"  📄 {secteur} - Page {page_num}...")
                     random_sleep(3, 6)
                     soup = BeautifulSoup(driver.page_source, 'html.parser')
                     items = soup.select("li.bi")
-                    
-                    if not items: 
+
+                    if not items:
                         print("  ⚠️ Aucun résultat détecté sur cette page.")
                         break
-                    
+
                     sel_items = driver.find_elements(By.CSS_SELECTOR, "li.bi")
+
                     def decode_pjlb(element):
                         try:
                             pj_data = json.loads(element['data-pjlb'])
@@ -197,7 +211,6 @@ def scrape_pagesjaunes():
                             nom = raw_name_tag.get_text(strip=True) if raw_name_tag else ""
 
                             # ── LIEN DÉTAILLÉ ──────────────────────────────────────
-                            # Stratégie 0 : id du li.bi = "bi-XXXXXXXX" → URL propre /pros/XXXXXXXX
                             lien_detaille = ""
                             li_id = item_soup.get('id', '')
                             if li_id.startswith('bi-'):
@@ -205,7 +218,6 @@ def scrape_pagesjaunes():
                                 if epj.isdigit():
                                     lien_detaille = f"https://www.pagesjaunes.fr/pros/{epj}"
 
-                            # Fallback : a.bi-denomination href ou data-pjlb
                             if not lien_detaille:
                                 a_tag = item_soup.select_one("a.bi-denomination")
                                 if not a_tag:
@@ -228,32 +240,24 @@ def scrape_pagesjaunes():
                             addr, cp, ville = parse_address(raw_addr)
 
                             # ── TÉLÉPHONE ──────────────────────────────────────────
-                            # Structure réelle PagesJaunes : div.bi-fantomas > div.number-contact
-                            # Numéro arcep : div.bi-fantomas .num-arcep
                             phone = ""
-
-                            # Format arcep (numéro surtaxé)
                             arcep = item_soup.select_one(".bi-fantomas .num-arcep, .bi-fantomas .num.num-arcep")
                             if arcep:
                                 phone = arcep.get_text(strip=True)
 
-                            # Format standard : texte direct dans .number-contact
                             if not phone:
                                 nc = item_soup.select_one(".bi-fantomas .number-contact, .number-contact")
                                 if nc:
                                     raw_phone = nc.get_text(strip=True)
-                                    # Extraire uniquement le numéro (regex numéro français)
                                     m = re.search(r'(\d[\d\s\.\-]{6,14}\d)', raw_phone)
                                     if m:
                                         phone = m.group(1).strip()
 
-                            # Fallback : lien tel:
                             if not phone:
                                 tel_link = item_soup.select_one("a[href^='tel:']")
                                 if tel_link:
                                     phone = tel_link['href'].replace("tel:", "").strip()
 
-                            # Fallback clic bouton si toujours rien
                             if not phone and i < len(sel_items):
                                 try:
                                     btn_selectors = [
@@ -270,7 +274,6 @@ def scrape_pagesjaunes():
                                         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
                                         driver.execute_script("arguments[0].click();", btn)
                                         time.sleep(1.5)
-                                        # Après clic : chercher le tel: link ou .number-contact
                                         updated_html = sel_items[i].get_attribute("outerHTML")
                                         updated_soup = BeautifulSoup(updated_html, 'html.parser')
                                         tel_after = updated_soup.select_one("a[href^='tel:']")
@@ -286,7 +289,7 @@ def scrape_pagesjaunes():
                                                 phone = raw.replace("tel:", "").replace("Tél :", "").strip()
                                 except:
                                     pass
-                            
+
                             result = {
                                 "Nom de l'entreprise": nom,
                                 "Activité": activite,
@@ -298,10 +301,10 @@ def scrape_pagesjaunes():
                                 "Lien détaillé": lien_detaille
                             }
                             page_data.append(result)
-                        except Exception as e: 
+                        except Exception as e:
                             print(f"    ⚠️ Erreur extraction item: {e}")
-                    
-                    # Diagnostic : compter les liens et téléphones trouvés
+
+                    # Diagnostic
                     links_found = sum(1 for r in page_data if r.get("Lien détaillé"))
                     phones_found = sum(1 for r in page_data if r.get("Téléphone"))
                     total_items = len(page_data)
@@ -314,14 +317,12 @@ def scrape_pagesjaunes():
                     else:
                         print(f"    📞 {phones_found}/{total_items} téléphones trouvés")
 
-                    # Save page results immediately to CSV
+                    # Append des résultats de la page (le fichier a déjà son en-tête)
                     if page_data:
-                        is_empty = not os.path.exists(output_file) or os.stat(output_file).st_size == 0
                         with open(output_file, "a", newline="", encoding="utf-8-sig") as f:
                             writer = csv.DictWriter(f, fieldnames=keys)
-                            if is_empty:
-                                writer.writeheader()
                             writer.writerows(page_data)
+                        total_rows += len(page_data)
                         print(f"    ✅ {len(page_data)} résultats enregistrés.")
 
                     # Next page
@@ -330,10 +331,10 @@ def scrape_pagesjaunes():
                         if not next_btn_elements:
                             break
                         next_btn = next_btn_elements[0]
-                        
+
                         if "disabled" in next_btn.get_attribute("class") or next_btn.get_attribute("aria-disabled") == "true":
                             break
-                        
+
                         data_pjlb = next_btn.get_attribute("data-pjlb")
                         next_url = None
                         if data_pjlb:
@@ -366,88 +367,26 @@ def scrape_pagesjaunes():
                             driver.execute_script("arguments[0].click();", next_btn)
                             random_sleep(5, 8)
                             page_num += 1
-                            
+
                     except:
                         break
-                        
+
             except Exception as e:
                 print(f"⚠️ Erreur lors de la recherche pour {secteur}: {e}")
-            
+
             random_sleep(5, 10)
-            
+
     finally:
         driver.quit()
-        print(f"\n🏁 Scraping terminé. Données stockées dans {output_file}")
+        print(f"\n🏁 Scraping {department} terminé. {total_rows} lignes brutes → {output_file}")
 
-    # ==========================================
-    # PIPELINE D'ENRICHISSEMENT ET DE NETTOYAGE
-    # ==========================================
-    enrich_dir = os.path.join(base_dir, "enrichement-scrappy")
-    input_enrich_csv = os.path.join(enrich_dir, "input.csv")
-    
-    print("\n" + "="*60)
-    print("🚀 LANCEMENT DU PIPELINE D'ENRICHISSEMENT")
-    print("="*60)
-    
-    if not os.path.exists(enrich_dir):
-        print(f"❌ Le dossier {enrich_dir} est introuvable. L'enrichissement est annulé.")
-        return
+    return total_rows
 
-    if not os.path.exists(output_file):
-        print(f"❌ Le fichier source {output_file} est introuvable. L'enrichissement est annulé.")
-        return
-
-    # Copier le fichier raw vers input.csv
-    try:
-        shutil.copy(output_file, input_enrich_csv)
-        print(f"✅ Fichier copié vers: {input_enrich_csv}")
-    except Exception as e:
-        print(f"❌ Erreur lors de la copie du fichier: {e}")
-        return
-    
-    import sys
-    python_cmd = "python3" if os.name != 'nt' else "python"
-
-    # Étape 1: Exécuter scraper.py pour obtenir les SIRET/SIREN
-    print("\n[1/3] Récupération des informations légales (SIRET/SIREN)...")
-    try:
-        subprocess.run([python_cmd, "scraper.py"], cwd=enrich_dir, input="1\n", text=True, check=True)
-        
-        # Vérification
-        if not os.path.exists(os.path.join(enrich_dir, "output_enriched.csv")):
-            print("❌ Échec : 'output_enriched.csv' n'a pas été généré.")
-            return
-    except Exception as e:
-        print(f"⚠️ Erreur lors de l'exécution de scraper.py: {e}")
-        return
-    
-    # Étape 2: Exécuter dirigeant.py pour obtenir les noms des dirigeants
-    print("\n[2/3] Recherche des noms des dirigeants sur Pappers...")
-    try:
-        subprocess.run([python_cmd, "dirigeant.py"], cwd=enrich_dir, input="1\no\n", text=True, check=True)
-        
-        # Vérification
-        if not os.path.exists(os.path.join(enrich_dir, "output_final.csv")):
-            print("❌ Échec : 'output_final.csv' n'a pas été généré.")
-            return
-    except Exception as e:
-        print(f"⚠️ Erreur lors de l'exécution de dirigeant.py: {e}")
-        return
-    
-    # Étape 3: Exécuter cleaner.py pour nettoyer et nommer le fichier final
-    print("\n[3/3] Nettoyage et formatage final...")
-    dept_file_name = f"{department}.csv"
-    try:
-        subprocess.run([python_cmd, "cleaner.py"], cwd=enrich_dir, input=f"1\n{dept_file_name}\n", text=True, check=True)
-        
-        final_output = os.path.join(enrich_dir, dept_file_name)
-        if os.path.exists(final_output):
-            print("\n🎉 PROCESSUS COMPLET TERMINÉ !")
-            print(f"📂 Le fichier final nettoyé a été créé : {final_output}")
-        else:
-            print(f"⚠️ Nettoyage terminé mais le fichier {dept_file_name} semble manquant.")
-    except Exception as e:
-        print(f"⚠️ Erreur lors de l'exécution de cleaner.py: {e}")
 
 if __name__ == "__main__":
-    scrape_pagesjaunes()
+    # Exécution autonome : scrape un seul département (utile pour tester)
+    dept = input("Département (ex: 34) : ").strip()
+    secteurs = load_secteurs()
+    out = os.path.join(config.WORK_DIR, config.RAW_CSV)
+    config.ensure_dirs()
+    scrape_department(dept, out, secteurs)

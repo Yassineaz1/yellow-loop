@@ -22,6 +22,59 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def detect_chrome_major():
+    """
+    Détecte la version MAJEURE de Chrome installée sur la machine.
+    Fonctionne sur Windows (PC dev) ET Linux (serveur VPS).
+    Retourne un int (ex: 148) ou None si introuvable.
+
+    Indispensable pour undetected_chromedriver : sans la bonne version_main,
+    le driver télécharge une version qui ne correspond pas au Chrome du serveur
+    et plante avec "This version of ChromeDriver only supports Chrome version X".
+    """
+    import subprocess
+    import shutil as _sh
+
+    candidates = []
+    if os.name == "nt":
+        candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+    else:
+        for name in ("google-chrome", "google-chrome-stable", "chromium-browser", "chromium"):
+            path = _sh.which(name)
+            if path:
+                candidates.append(path)
+
+    for bin_path in candidates:
+        try:
+            out = subprocess.run(
+                [bin_path, "--version"], capture_output=True, text=True, timeout=10
+            )
+            m = re.search(r"(\d+)\.", out.stdout)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            continue
+
+    # Fallback Windows : registre
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["reg", "query", r"HKCU\Software\Google\Chrome\BLBeacon", "/v", "version"],
+                capture_output=True, text=True, timeout=10
+            )
+            m = re.search(r"version\s+REG_SZ\s+(\d+)\.", out.stdout)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            pass
+
+    return None
+
+
 class BusinessScraper:
     def __init__(self, input_csv='input.csv', output_csv='output_enriched.csv', headless=True):
         self.input_csv = input_csv
@@ -100,12 +153,22 @@ class BusinessScraper:
                 raise FileNotFoundError(f"Impossible de trouver chromedriver dans {driver_dir}")
             
             logger.info(f"Lancement de Undetected Chromedriver avec le binaire : {driver_path}")
-            self.driver = uc.Chrome(
+
+            # Détection automatique de la version Chrome (Windows: 148, serveur: ce qui est installé)
+            chrome_major = detect_chrome_major()
+            uc_kwargs = dict(
                 driver_executable_path=driver_path,
                 options=chrome_options,
                 headless=self.headless,
-                use_subprocess=True
+                use_subprocess=True,
             )
+            if chrome_major:
+                logger.info(f"Version majeure de Chrome détectée : {chrome_major}")
+                uc_kwargs["version_main"] = chrome_major
+            else:
+                logger.warning("Version de Chrome non détectée, auto-détection par undetected_chromedriver.")
+
+            self.driver = uc.Chrome(**uc_kwargs)
             self.driver.set_page_load_timeout(30)
             
             logger.info("Navigateur Chrome initialise avec succes (Mode Undetected)")

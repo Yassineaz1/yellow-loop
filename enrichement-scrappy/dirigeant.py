@@ -55,24 +55,34 @@ class PappersDirigeantScraper:
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         
         try:
-            driver_path = ChromeDriverManager().install()
-            
-            # Correction pour le binaire sur Windows vs Linux
             import platform
+            import glob
+            raw_path = ChromeDriverManager().install()
+            driver_path = raw_path
+            driver_dir = os.path.dirname(raw_path)
             is_windows = platform.system() == "Windows"
-            
-            if is_windows and not driver_path.lower().endswith('.exe'):
-                parent_dir = os.path.dirname(driver_path)
-                potential_exe = os.path.join(parent_dir, 'chromedriver.exe')
-                if os.path.exists(potential_exe):
-                    driver_path = potential_exe
-                else:
-                    # Chercher dans les sous-répertoires si nécessaire
-                    for root, dirs, files in os.walk(parent_dir):
-                        if 'chromedriver.exe' in files:
-                            driver_path = os.path.join(root, 'chromedriver.exe')
-                            break
-            
+            exe_name = "chromedriver.exe" if is_windows else "chromedriver"
+
+            # ChromeDriverManager peut renvoyer un fichier de licence/notices (Windows ET Linux)
+            # au lieu du vrai binaire. On cherche manuellement le bon exécutable.
+            basename = os.path.basename(raw_path)
+            if basename != exe_name or "NOTICES" in basename or "LICENSE" in basename:
+                for c in glob.glob(os.path.join(driver_dir, "chromedriver*")):
+                    cb = os.path.basename(c)
+                    if not os.path.isfile(c) or "NOTICES" in cb or "LICENSE" in cb:
+                        continue
+                    if is_windows and not c.lower().endswith(".exe"):
+                        continue
+                    driver_path = c
+                    break
+
+            # Sur Linux, garantir que le binaire est exécutable
+            if not is_windows:
+                try:
+                    os.chmod(driver_path, 0o755)
+                except Exception:
+                    pass
+
             logger.info(f"📍 Utilisation du driver: {driver_path}")
             service = ChromeService(driver_path)
             self.driver = webdriver.Chrome(service=service, options=chrome_options)

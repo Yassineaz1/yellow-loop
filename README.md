@@ -6,27 +6,45 @@ Yellow Loop is an automated, end-to-end data extraction and enrichment pipeline 
 
 The primary goal of this tool is to generate high-quality, actionable B2B lead files based on a given geographical department and specific business sectors. The pipeline operates autonomously through a sequence of interconnected scripts that scrape, enrich, and sanitize the data.
 
-### Pipeline Architecture
+### Architecture (orchestrateur en boucle)
 
-The execution follows a strict 4-step process:
+Le pipeline est piloté par **un seul script : `run.py`**. Il traite automatiquement
+la liste de départements de `departements.txt`, l'un après l'autre, sans intervention.
 
-1. **Initial Scraping (`scraper.py`)**
-   - Reads target sectors from `secteur.txt`.
-   - Navigates the PagesJaunes directory to extract base information: Company Name, Activity, Phone Number, Address, and Detailed URL.
-   - Bypasses basic bot protections and handles dynamic DOM rendering for hidden phone numbers.
+```
+run.py  (orchestrateur)
+  pour chaque département de departements.txt :
+    1. purge work/                     (aucun reste du département précédent)
+    2. scraper.py        -> work/input.csv           (PagesJaunes, CSV frais)
+    3. enrichement-scrappy/scraper.py   -> work/output_enriched.csv   (SIRET/SIREN)
+    4. enrichement-scrappy/dirigeant.py -> work/output_final.csv       (dirigeants Pappers)
+    5. enrichement-scrappy/cleaner.py   -> work/{dept}.csv             (nettoyage)
+    6. déplace le résultat -> db/{dept}.csv
+    7. marque le département "done" dans state/progress.json
+    8. purge work/ -> département suivant
+```
 
-2. **Legal Information Enrichment (`enrichement-scrappy/scraper.py`)**
-   - Visits each previously extracted Detailed URL.
-   - Scrapes the B2B/Legal section to retrieve the SIRET, SIREN, NAF Code, Legal Form, and Creation Date.
+**Garanties de la nouvelle structure :**
+- `work/` est **purgé entre chaque département** : plus aucune collision de CSV.
+- Le CSV brut est réécrit en mode `"w"` à chaque fois (fini l'accumulation accidentelle).
+- Seul `db/{dept}.csv` survit ; tous les intermédiaires sont jetables.
+- `state/progress.json` permet la **reprise après crash** : les départements déjà
+  faits sont sautés. Les départements en échec sont marqués `failed` et la boucle
+  continue (relancer avec `python3 run.py --retry-failed`).
 
-3. **Executive Enrichment (`enrichement-scrappy/dirigeant.py`)**
-   - Connects to Pappers.fr using the extracted SIREN/SIRET.
-   - Parses the legal documentation to identify and extract the names of the company's executives (Dirigeants).
+### Fichiers de configuration
+| Fichier | Rôle |
+|---|---|
+| `departements.txt` | liste des départements à traiter (un par ligne, `#` = commentaire) |
+| `secteur.txt` | liste des secteurs/métiers à rechercher |
+| `config.py` | tous les chemins du projet (source unique de vérité) |
 
-4. **Data Sanitization (`enrichement-scrappy/cleaner.py`)**
-   - Filters out incomplete entries (e.g., missing phone numbers or invalid executive names).
-   - Standardizes phone number formats.
-   - Outputs a clean, final CSV file named automatically after the targeted department (e.g., `67.csv`).
+### Consulter / récupérer les résultats
+```bash
+python3 db_tool.py list        # départements finis + nb de lignes
+python3 db_tool.py status      # done / failed / restants
+python3 db_tool.py get 34      # chemin local + commande scp de téléchargement
+```
 
 ---
 
@@ -45,12 +63,17 @@ pip install -r requirements.txt
 ```
 
 ### Usage
-Define your target sectors (one per line) in `secteur.txt`.
-Run the main script:
+1. Définir les secteurs (un par ligne) dans `secteur.txt`.
+2. Définir les départements à traiter dans `departements.txt`.
+3. Lancer l'orchestrateur :
 ```bash
-python scraper.py
+python3 run.py
 ```
-When prompted, enter the target department number. The pipeline will then execute all 4 steps sequentially.
+La boucle traite tous les départements automatiquement et range chaque résultat
+dans `db/{dept}.csv`. Pour relancer uniquement les départements en échec :
+```bash
+python3 run.py --retry-failed
+```
 
 ---
 
@@ -91,7 +114,7 @@ tmux new -s scraper
 
 Launch the pipeline:
 ```bash
-python3 scraper.py
+python3 run.py
 ```
 
 Detach from the session to leave it running in the background:
@@ -105,7 +128,7 @@ tmux attach -t scraper
 
 ## Output Format
 
-The final processed dataset is saved in `enrichement-scrappy/<department_number>.csv` and contains the following structured fields:
+The final processed dataset is saved in `db/<department_number>.csv` and contains the following structured fields:
 - Nom de l'entreprise
 - Activité
 - Téléphone

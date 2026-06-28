@@ -5,3 +5,8 @@ __pycache__/
 *.pyc
 .env
 debug_selenium.html
+
+# Dossier de travail éphémère et état d'avancement (runtime)
+work/
+state/progress.json
+!**/.gitkeep

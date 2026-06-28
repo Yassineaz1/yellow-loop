@@ -11,3 +11,6 @@ elevages
 pepiniere 
 jardinerie 
 ateliers
+café 
+bar 
+salle de sport
