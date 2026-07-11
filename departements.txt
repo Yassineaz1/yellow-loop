@@ -4,10 +4,10 @@
 # Les lignes vides et les commentaires sont ignorés.
 #
 # Région Occitanie :
-09   # Ariège
-11   # Aude
-12   # Aveyron
-30   # Gard
+# 09   # Ariège         — déjà scrappé, BDD existante
+# 11   # Aude            — déjà scrappé, BDD existante
+# 12   # Aveyron         — skip (démarrage au 30)
+30   # Gard             ← reprend ici
 31   # Haute-Garonne
 32   # Gers
 34   # Hérault
