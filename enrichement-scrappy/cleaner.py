@@ -1,6 +1,7 @@
 import csv
 import re
 import os
+import sys
 import logging
 from pathlib import Path
 
@@ -326,31 +327,54 @@ class CSVCleaner:
             logger.info(f"   🧹 Noms dirigeants nettoyés: {cleaned_dirigeant_count}")
             logger.info(f"   ✅ Gardées: {kept} ({kept/total*100:.1f}%)")
             
-            # Demander le nom du fichier de sortie
+            # Refuser d'écrire un CSV vide — évite le "faux succès" du pipeline
+            if kept == 0:
+                logger.error("❌ AUCUNE ligne valide à écrire — le CSV ne sera PAS créé.")
+                logger.error(f"   Vérifie la source ({self.input_csv}) : téléphones manquants "
+                             f"ou dirigeants invalides à 100%.")
+                return False
+
+            # Nom de sortie : argv[1] > self.output_csv > input() en mode interactif
             logger.info("\n" + "="*60)
             logger.info("💾 SAUVEGARDE")
             logger.info("="*60)
-            
+
             default_name = "output_cleaned.csv"
-            print(f"\n📝 Nom du fichier de sortie (par défaut: {default_name})")
-            output_name = input("   Votre choix (Entrée pour défaut): ").strip()
-            
+            output_name = self.output_csv
             if not output_name:
-                output_name = default_name
-            
-            # Ajouter .csv si absent
+                if len(sys.argv) > 1 and sys.argv[1].strip():
+                    output_name = sys.argv[1].strip()
+                elif sys.stdin.isatty():
+                    print(f"\n📝 Nom du fichier de sortie (par défaut: {default_name})")
+                    output_name = input("   Votre choix (Entrée pour défaut): ").strip() or default_name
+                else:
+                    # Piped stdin — on lit une ligne éventuelle sinon défaut
+                    try:
+                        output_name = input().strip() or default_name
+                    except EOFError:
+                        output_name = default_name
+
             if not output_name.endswith('.csv'):
                 output_name += '.csv'
-            
+
             self.output_csv = output_name
-            
-            # Sauvegarder
-            with open(self.output_csv, 'w', encoding='utf-8', newline='') as f:
+
+            # Écriture atomique : .tmp puis os.replace
+            tmp_path = self.output_csv + ".tmp"
+            with open(tmp_path, 'w', encoding='utf-8', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(cleaned_rows)
-            
-            logger.info(f"\n✅ Fichier sauvegardé: {self.output_csv}")
+
+            # Vérification stricte avant de valider
+            written_size = os.path.getsize(tmp_path)
+            if written_size == 0:
+                os.remove(tmp_path)
+                logger.error("❌ Le fichier temporaire est vide — abandon.")
+                return False
+
+            os.replace(tmp_path, self.output_csv)
+            logger.info(f"\n✅ Fichier sauvegardé: {self.output_csv} ({written_size} octets)")
             
             # Aperçu des résultats
             if cleaned_rows:
@@ -438,32 +462,61 @@ def test_dirigeant_cleaning():
 
 
 def main():
-    """Point d'entrée principal"""
+    """Point d'entrée principal.
+
+    Usage :
+      python cleaner.py                  # interactif (menu) si TTY
+      python cleaner.py <output.csv>     # non-interactif, mode 1 direct
+      echo "1\\n30.csv\\n" | python cleaner.py   # rétro-compat pipeline
+
+    Retour : 0 succès, 1 échec (aucune ligne valide OU erreur).
+    """
     cleaner = CSVCleaner(input_csv='output_final.csv')
-    
     cleaner.print_banner()
-    
+
+    # 1. Nom passé en argument → mode non-interactif, on saute le menu
+    if len(sys.argv) > 1 and sys.argv[1].strip():
+        cleaner.output_csv = sys.argv[1].strip()
+        success = cleaner.process_csv()
+        return 0 if success else 1
+
+    # 2. Pas de TTY (piped stdin) → lire une ligne comme choix, une comme nom
+    if not sys.stdin.isatty():
+        try:
+            choix = input().strip()
+        except EOFError:
+            choix = "1"
+        if choix == "2":
+            test_phone_cleaning()
+            return 0
+        if choix == "3":
+            test_dirigeant_cleaning()
+            return 0
+        # Nom de sortie sera lu par process_csv() depuis stdin
+        success = cleaner.process_csv()
+        return 0 if success else 1
+
+    # 3. Mode interactif
     print("Options:")
     print("  1. Nettoyer le CSV (mode normal)")
     print("  2. Tester le nettoyage des téléphones")
     print("  3. Tester le nettoyage des dirigeants")
     print()
-    
     choix = input("Votre choix (1, 2 ou 3, Entrée pour 1): ").strip()
-    
+
     if choix == "2":
         test_phone_cleaning()
-    elif choix == "3":
+        return 0
+    if choix == "3":
         test_dirigeant_cleaning()
-    else:
-        success = cleaner.process_csv()
-        
-        if success:
-            print("\n✅ Nettoyage terminé avec succès!")
-            return 0
-        else:
-            print("\n❌ Erreur lors du nettoyage")
-            return 1
+        return 0
+
+    success = cleaner.process_csv()
+    if success:
+        print("\n✅ Nettoyage terminé avec succès!")
+        return 0
+    print("\n❌ Erreur lors du nettoyage")
+    return 1
 
 
 if __name__ == "__main__":

@@ -131,260 +131,300 @@ def load_secteurs(secteur_file=None):
     return secteurs
 
 
-def scrape_department(department, output_file, secteurs):
-    """
-    Scrape tous les `secteurs` pour un `department` donné et écrit un CSV brut FRAIS.
+class ScraperBlocked(Exception):
+    """Levée quand PagesJaunes a probablement changé son HTML ou déclenché un anti-bot.
 
-    - `output_file` est TOUJOURS réinitialisé (mode "w") : aucune accumulation
-      des données d'un département précédent.
-    - Retourne le nombre total de lignes écrites.
+    Se déclenche après N pages consécutives où 0 téléphone est extrait alors
+    que des résultats sont présents — inutile de continuer 3 jours dans le vide.
+    """
+
+
+# Nombre de pages consécutives sans téléphone tolérées avant d'arrêter le secteur.
+MAX_CONSECUTIVE_NO_PHONE_PAGES = 3
+
+
+def scrape_sector(driver, department, secteur, output_file):
+    """
+    Scrape UN SEUL secteur d'un département et écrit un CSV brut FRAIS.
+
+    - `driver` : instance Selenium partagée entre secteurs (économise le setup).
+    - `output_file` est réinitialisé (mode "w") — pas d'accumulation.
+    - Retourne le nombre de lignes écrites.
+    - Lève ScraperBlocked si le sélecteur téléphone semble cassé.
     """
     keys = config.CSV_HEADERS
-
-    # Réinitialisation : on repart d'un fichier vide avec en-tête.
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=keys)
         writer.writeheader()
 
     total_rows = 0
-    print(f"🚀 Scraping de {len(secteurs)} secteurs dans le département {department}...")
+    consecutive_no_phone = 0
 
+    print(f"\n🔍 Recherche de: {secteur} dans le {department}...")
+    driver.get("https://www.pagesjaunes.fr/")
+    random_sleep(2, 4)
+    handle_cookie_banner(driver)
+
+    try:
+        wait = WebDriverWait(driver, 10)
+        q_input = wait.until(EC.presence_of_element_located((By.ID, "quoiqui")))
+        o_input = driver.find_element(By.ID, "ou")
+        submit = driver.find_element(By.ID, "findId")
+
+        q_input.clear()
+        q_input.send_keys(secteur)
+        o_input.clear()
+        o_input.send_keys(department)
+        random_sleep(0.5, 1.5)
+        driver.execute_script("arguments[0].click();", submit)
+
+        page_num = 1
+        while True:
+            print(f"  📄 {secteur} - Page {page_num}...")
+            random_sleep(3, 6)
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            items = soup.select("li.bi")
+
+            if not items:
+                print("  ⚠️ Aucun résultat détecté sur cette page.")
+                break
+
+            sel_items = driver.find_elements(By.CSS_SELECTOR, "li.bi")
+
+            def decode_pjlb(element):
+                try:
+                    pj_data = json.loads(element['data-pjlb'])
+                    url_b64 = pj_data.get("url")
+                    if url_b64:
+                        return "https://www.pagesjaunes.fr" + base64.b64decode(url_b64).decode("utf-8")
+                except:
+                    pass
+                return ""
+
+            def href_to_url(href):
+                if not href:
+                    return ""
+                if href.startswith('/'):
+                    return "https://www.pagesjaunes.fr" + href
+                if href.startswith('http'):
+                    return href
+                return ""
+
+            page_data = []
+            for i, item_soup in enumerate(items):
+                try:
+                    raw_name_tag = item_soup.select_one("h3, .bi-denomination")
+                    nom = raw_name_tag.get_text(strip=True) if raw_name_tag else ""
+
+                    lien_detaille = ""
+                    li_id = item_soup.get('id', '')
+                    if li_id.startswith('bi-'):
+                        epj = li_id[3:]
+                        if epj.isdigit():
+                            lien_detaille = f"https://www.pagesjaunes.fr/pros/{epj}"
+
+                    if not lien_detaille:
+                        a_tag = item_soup.select_one("a.bi-denomination")
+                        if not a_tag:
+                            a_tag = item_soup.select_one("a[href*='/pros/']")
+                        if a_tag:
+                            if 'data-pjlb' in a_tag.attrs:
+                                lien_detaille = decode_pjlb(a_tag)
+                            if not lien_detaille:
+                                lien_detaille = href_to_url(a_tag.get('href', ''))
+
+                    activity_tag = item_soup.select_one(".bi-activity-unit")
+                    activite = activity_tag.get_text(strip=True) if activity_tag else secteur
+
+                    raw_addr = item_soup.select_one(".bi-address")
+                    raw_addr = raw_addr.get_text(strip=True) if raw_addr else ""
+                    if "Voir le plan" in raw_addr:
+                        raw_addr = raw_addr.replace("Voir le plan", "").strip()
+                    addr, cp, ville = parse_address(raw_addr)
+
+                    phone = ""
+                    arcep = item_soup.select_one(".bi-fantomas .num-arcep, .bi-fantomas .num.num-arcep")
+                    if arcep:
+                        phone = arcep.get_text(strip=True)
+
+                    if not phone:
+                        nc = item_soup.select_one(".bi-fantomas .number-contact, .number-contact")
+                        if nc:
+                            raw_phone = nc.get_text(strip=True)
+                            m = re.search(r'(\d[\d\s\.\-]{6,14}\d)', raw_phone)
+                            if m:
+                                phone = m.group(1).strip()
+
+                    if not phone:
+                        tel_link = item_soup.select_one("a[href^='tel:']")
+                        if tel_link:
+                            phone = tel_link['href'].replace("tel:", "").strip()
+
+                    if not phone and i < len(sel_items):
+                        try:
+                            btn_selectors = [
+                                "button.btn_tel", "button[class*='btn_tel']",
+                                "button[class*='tel']", "button[class*='phone']",
+                            ]
+                            btn = None
+                            for sel in btn_selectors:
+                                found = sel_items[i].find_elements(By.CSS_SELECTOR, sel)
+                                if found:
+                                    btn = found[0]
+                                    break
+                            if btn:
+                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                                driver.execute_script("arguments[0].click();", btn)
+                                time.sleep(1.5)
+                                updated_html = sel_items[i].get_attribute("outerHTML")
+                                updated_soup = BeautifulSoup(updated_html, 'html.parser')
+                                tel_after = updated_soup.select_one("a[href^='tel:']")
+                                if tel_after:
+                                    phone = tel_after['href'].replace("tel:", "").strip()
+                                else:
+                                    phone_elem = sel_items[i].find_elements(
+                                        By.CSS_SELECTOR,
+                                        ".number-contact, .numero, [class*='numero'], a[href^='tel:']"
+                                    )
+                                    if phone_elem:
+                                        raw = phone_elem[0].get_attribute("href") or phone_elem[0].text
+                                        phone = raw.replace("tel:", "").replace("Tél :", "").strip()
+                        except:
+                            pass
+
+                    result = {
+                        "Nom de l'entreprise": nom,
+                        "Activité": activite,
+                        "Téléphone": phone,
+                        "Adresse": addr,
+                        "Code Postal": cp,
+                        "Ville": ville,
+                        "Département": cp[:2] if cp else department,
+                        "Lien détaillé": lien_detaille
+                    }
+                    page_data.append(result)
+                except Exception as e:
+                    print(f"    ⚠️ Erreur extraction item: {e}")
+
+            phones_found = sum(1 for r in page_data if r.get("Téléphone"))
+            links_found = sum(1 for r in page_data if r.get("Lien détaillé"))
+            total_items = len(page_data)
+            print(f"    🔗 {links_found}/{total_items} liens | 📞 {phones_found}/{total_items} téléphones")
+
+            # Détection anti-bot / sélecteur cassé
+            if total_items > 0 and phones_found == 0:
+                consecutive_no_phone += 1
+                print(f"    ⚠️ Page sans téléphone ({consecutive_no_phone}/{MAX_CONSECUTIVE_NO_PHONE_PAGES})")
+                if consecutive_no_phone >= MAX_CONSECUTIVE_NO_PHONE_PAGES:
+                    raise ScraperBlocked(
+                        f"{consecutive_no_phone} pages consécutives à 0 téléphone sur "
+                        f"{secteur}/{department} — sélecteur cassé ou anti-bot actif."
+                    )
+            else:
+                consecutive_no_phone = 0
+
+            if page_data:
+                with open(output_file, "a", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.DictWriter(f, fieldnames=keys)
+                    writer.writerows(page_data)
+                total_rows += len(page_data)
+                print(f"    ✅ {len(page_data)} résultats enregistrés.")
+
+            # Page suivante
+            try:
+                next_btn_elements = driver.find_elements(By.ID, "pagination-next")
+                if not next_btn_elements:
+                    break
+                next_btn = next_btn_elements[0]
+
+                if "disabled" in next_btn.get_attribute("class") or next_btn.get_attribute("aria-disabled") == "true":
+                    break
+
+                data_pjlb = next_btn.get_attribute("data-pjlb")
+                next_url = None
+                if data_pjlb:
+                    try:
+                        pj_data = json.loads(data_pjlb)
+                        url_b64 = pj_data.get("url")
+                        if url_b64:
+                            decoded_path = base64.b64decode(url_b64).decode("utf-8")
+                            next_url = "https://www.pagesjaunes.fr" + decoded_path
+                    except Exception as e:
+                        print(f"    ⚠️ Erreur décodage pagination: {e}")
+
+                if next_url:
+                    print(f"    ➡️ Page suivante...")
+                    old_url = driver.current_url
+                    driver.get(next_url)
+                    try:
+                        WebDriverWait(driver, 15).until(lambda d: d.current_url != old_url)
+                        try:
+                            WebDriverWait(driver, 15).until(
+                                EC.presence_of_element_located((By.CSS_SELECTOR, "li.bi"))
+                            )
+                        except:
+                            random_sleep(5, 10)
+                        page_num += 1
+                    except:
+                        break
+                else:
+                    driver.execute_script("arguments[0].click();", next_btn)
+                    random_sleep(5, 8)
+                    page_num += 1
+            except:
+                break
+
+    except ScraperBlocked:
+        raise
+    except Exception as e:
+        print(f"⚠️ Erreur lors de la recherche pour {secteur}: {e}")
+
+    random_sleep(3, 6)
+    print(f"🏁 {secteur}/{department} : {total_rows} lignes brutes → {output_file}")
+    return total_rows
+
+
+def scrape_department(department, output_file, secteurs):
+    """Compatibilité : scrape tous les secteurs d'un dept dans UN SEUL fichier.
+
+    Conservé pour l'exécution directe de ce module. La production passe par
+    run.py qui appelle scrape_sector() par secteur pour une sauvegarde granulaire.
+    """
+    keys = config.CSV_HEADERS
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+
+    total_rows = 0
     driver = setup_driver()
     try:
         for secteur in secteurs:
-            print(f"\n🔍 Recherche de: {secteur} dans le {department}...")
-            driver.get("https://www.pagesjaunes.fr/")
-            random_sleep(2, 4)
-            handle_cookie_banner(driver)
-
+            sector_tmp = output_file + f".{secteur.strip().replace(' ', '_')}.tmp"
             try:
-                wait = WebDriverWait(driver, 10)
-                q_input = wait.until(EC.presence_of_element_located((By.ID, "quoiqui")))
-                o_input = driver.find_element(By.ID, "ou")
-                submit = driver.find_element(By.ID, "findId")
-
-                q_input.clear()
-                q_input.send_keys(secteur)
-                o_input.clear()
-                o_input.send_keys(department)
-                random_sleep(0.5, 1.5)
-                driver.execute_script("arguments[0].click();", submit)
-
-                page_num = 1
-                while True:
-                    print(f"  📄 {secteur} - Page {page_num}...")
-                    random_sleep(3, 6)
-                    soup = BeautifulSoup(driver.page_source, 'html.parser')
-                    items = soup.select("li.bi")
-
-                    if not items:
-                        print("  ⚠️ Aucun résultat détecté sur cette page.")
-                        break
-
-                    sel_items = driver.find_elements(By.CSS_SELECTOR, "li.bi")
-
-                    def decode_pjlb(element):
-                        try:
-                            pj_data = json.loads(element['data-pjlb'])
-                            url_b64 = pj_data.get("url")
-                            if url_b64:
-                                return "https://www.pagesjaunes.fr" + base64.b64decode(url_b64).decode("utf-8")
-                        except:
-                            pass
-                        return ""
-
-                    def href_to_url(href):
-                        if not href:
-                            return ""
-                        if href.startswith('/'):
-                            return "https://www.pagesjaunes.fr" + href
-                        if href.startswith('http'):
-                            return href
-                        return ""
-
-                    page_data = []
-                    for i, item_soup in enumerate(items):
-                        try:
-                            # Extraction Nom
-                            raw_name_tag = item_soup.select_one("h3, .bi-denomination")
-                            nom = raw_name_tag.get_text(strip=True) if raw_name_tag else ""
-
-                            # ── LIEN DÉTAILLÉ ──────────────────────────────────────
-                            lien_detaille = ""
-                            li_id = item_soup.get('id', '')
-                            if li_id.startswith('bi-'):
-                                epj = li_id[3:]
-                                if epj.isdigit():
-                                    lien_detaille = f"https://www.pagesjaunes.fr/pros/{epj}"
-
-                            if not lien_detaille:
-                                a_tag = item_soup.select_one("a.bi-denomination")
-                                if not a_tag:
-                                    a_tag = item_soup.select_one("a[href*='/pros/']")
-                                if a_tag:
-                                    if 'data-pjlb' in a_tag.attrs:
-                                        lien_detaille = decode_pjlb(a_tag)
-                                    if not lien_detaille:
-                                        lien_detaille = href_to_url(a_tag.get('href', ''))
-
-                            # Extraction Activité
-                            activity_tag = item_soup.select_one(".bi-activity-unit")
-                            activite = activity_tag.get_text(strip=True) if activity_tag else secteur
-
-                            # Extraction Adresse
-                            raw_addr = item_soup.select_one(".bi-address")
-                            raw_addr = raw_addr.get_text(strip=True) if raw_addr else ""
-                            if "Voir le plan" in raw_addr:
-                                raw_addr = raw_addr.replace("Voir le plan", "").strip()
-                            addr, cp, ville = parse_address(raw_addr)
-
-                            # ── TÉLÉPHONE ──────────────────────────────────────────
-                            phone = ""
-                            arcep = item_soup.select_one(".bi-fantomas .num-arcep, .bi-fantomas .num.num-arcep")
-                            if arcep:
-                                phone = arcep.get_text(strip=True)
-
-                            if not phone:
-                                nc = item_soup.select_one(".bi-fantomas .number-contact, .number-contact")
-                                if nc:
-                                    raw_phone = nc.get_text(strip=True)
-                                    m = re.search(r'(\d[\d\s\.\-]{6,14}\d)', raw_phone)
-                                    if m:
-                                        phone = m.group(1).strip()
-
-                            if not phone:
-                                tel_link = item_soup.select_one("a[href^='tel:']")
-                                if tel_link:
-                                    phone = tel_link['href'].replace("tel:", "").strip()
-
-                            if not phone and i < len(sel_items):
-                                try:
-                                    btn_selectors = [
-                                        "button.btn_tel", "button[class*='btn_tel']",
-                                        "button[class*='tel']", "button[class*='phone']",
-                                    ]
-                                    btn = None
-                                    for sel in btn_selectors:
-                                        found = sel_items[i].find_elements(By.CSS_SELECTOR, sel)
-                                        if found:
-                                            btn = found[0]
-                                            break
-                                    if btn:
-                                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-                                        driver.execute_script("arguments[0].click();", btn)
-                                        time.sleep(1.5)
-                                        updated_html = sel_items[i].get_attribute("outerHTML")
-                                        updated_soup = BeautifulSoup(updated_html, 'html.parser')
-                                        tel_after = updated_soup.select_one("a[href^='tel:']")
-                                        if tel_after:
-                                            phone = tel_after['href'].replace("tel:", "").strip()
-                                        else:
-                                            phone_elem = sel_items[i].find_elements(
-                                                By.CSS_SELECTOR,
-                                                ".number-contact, .numero, [class*='numero'], a[href^='tel:']"
-                                            )
-                                            if phone_elem:
-                                                raw = phone_elem[0].get_attribute("href") or phone_elem[0].text
-                                                phone = raw.replace("tel:", "").replace("Tél :", "").strip()
-                                except:
-                                    pass
-
-                            result = {
-                                "Nom de l'entreprise": nom,
-                                "Activité": activite,
-                                "Téléphone": phone,
-                                "Adresse": addr,
-                                "Code Postal": cp,
-                                "Ville": ville,
-                                "Département": cp[:2] if cp else department,
-                                "Lien détaillé": lien_detaille
-                            }
-                            page_data.append(result)
-                        except Exception as e:
-                            print(f"    ⚠️ Erreur extraction item: {e}")
-
-                    # Diagnostic
-                    links_found = sum(1 for r in page_data if r.get("Lien détaillé"))
-                    phones_found = sum(1 for r in page_data if r.get("Téléphone"))
-                    total_items = len(page_data)
-                    if links_found == 0 and total_items:
-                        print(f"    ⚠️ ATTENTION : 0/{total_items} liens — sélecteur HTML peut-être changé")
-                    else:
-                        print(f"    🔗 {links_found}/{total_items} liens détaillés")
-                    if phones_found == 0 and total_items:
-                        print(f"    ⚠️ ATTENTION : 0/{total_items} téléphones — sélecteur HTML peut-être changé")
-                    else:
-                        print(f"    📞 {phones_found}/{total_items} téléphones trouvés")
-
-                    # Append des résultats de la page (le fichier a déjà son en-tête)
-                    if page_data:
-                        with open(output_file, "a", newline="", encoding="utf-8-sig") as f:
-                            writer = csv.DictWriter(f, fieldnames=keys)
-                            writer.writerows(page_data)
-                        total_rows += len(page_data)
-                        print(f"    ✅ {len(page_data)} résultats enregistrés.")
-
-                    # Next page
-                    try:
-                        next_btn_elements = driver.find_elements(By.ID, "pagination-next")
-                        if not next_btn_elements:
-                            break
-                        next_btn = next_btn_elements[0]
-
-                        if "disabled" in next_btn.get_attribute("class") or next_btn.get_attribute("aria-disabled") == "true":
-                            break
-
-                        data_pjlb = next_btn.get_attribute("data-pjlb")
-                        next_url = None
-                        if data_pjlb:
-                            try:
-                                pj_data = json.loads(data_pjlb)
-                                url_b64 = pj_data.get("url")
-                                if url_b64:
-                                    decoded_path = base64.b64decode(url_b64).decode("utf-8")
-                                    next_url = "https://www.pagesjaunes.fr" + decoded_path
-                            except Exception as e:
-                                print(f"    ⚠️ Erreur décodage pagination: {e}")
-
-                        if next_url:
-                            print(f"    ➡️ Navigation vers page suivante...")
-                            old_url = driver.current_url
-                            driver.get(next_url)
-                            try:
-                                WebDriverWait(driver, 15).until(lambda d: d.current_url != old_url)
-                                try:
-                                    WebDriverWait(driver, 15).until(
-                                        EC.presence_of_element_located((By.CSS_SELECTOR, "li.bi"))
-                                    )
-                                except:
-                                    print("    ⚠️ Pas de résultats détectés, attente prolongée...")
-                                    random_sleep(5, 10)
-                                page_num += 1
-                            except:
-                                break
-                        else:
-                            driver.execute_script("arguments[0].click();", next_btn)
-                            random_sleep(5, 8)
-                            page_num += 1
-
-                    except:
-                        break
-
-            except Exception as e:
-                print(f"⚠️ Erreur lors de la recherche pour {secteur}: {e}")
-
-            random_sleep(5, 10)
-
+                n = scrape_sector(driver, department, secteur, sector_tmp)
+            except ScraperBlocked as e:
+                print(f"🛑 {e}")
+                continue
+            # append au fichier commun
+            if n > 0 and os.path.exists(sector_tmp):
+                with open(sector_tmp, "r", encoding="utf-8-sig") as src:
+                    next(src, None)  # skip header
+                    with open(output_file, "a", encoding="utf-8-sig") as dst:
+                        dst.write(src.read())
+                total_rows += n
+            try:
+                os.remove(sector_tmp)
+            except OSError:
+                pass
     finally:
         driver.quit()
         print(f"\n🏁 Scraping {department} terminé. {total_rows} lignes brutes → {output_file}")
-
     return total_rows
 
 
 if __name__ == "__main__":
-    # Exécution autonome : scrape un seul département (utile pour tester)
     dept = input("Département (ex: 34) : ").strip()
     secteurs = load_secteurs()
     out = os.path.join(config.WORK_DIR, config.RAW_CSV)
