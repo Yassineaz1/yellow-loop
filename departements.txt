@@ -3,17 +3,14 @@
 # Tout ce qui suit après "#" est un commentaire ignoré.
 # Les lignes vides et les commentaires sont ignorés.
 #
-# Région Occitanie :
-# 09   # Ariège         — déjà scrappé, BDD existante
-# 11   # Aude            — déjà scrappé, BDD existante
-# 12   # Aveyron         — skip (démarrage au 30)
-30   # Gard             ← reprend ici
-31   # Haute-Garonne
+# Région PACA + Occitanie (sélection ciblée)
+06   # Alpes-Maritimes
+83   # Var
+04   # Alpes-de-Haute-Provence
+05   # Hautes-Alpes
+84   # Vaucluse
+13   # Bouches-du-Rhône
 32   # Gers
-34   # Hérault
-46   # Lot
-48   # Lozère
-65   # Hautes-Pyrénées
-66   # Pyrénées-Orientales
 81   # Tarn
+46   # Lot
 82   # Tarn-et-Garonne
