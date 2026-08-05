@@ -126,6 +126,55 @@ def run_subscript(script_name, stdin_text=None, extra_args=None):
 
 
 # ──────────────────────────────────────────────────────────────────────────
+#  Résilience Selenium — driver vivant / recyclage
+# ──────────────────────────────────────────────────────────────────────────
+
+# Restart préventif toutes les N sectors pour éviter les fuites mémoire Chrome
+# et les sessions webdriver qui se dégradent après des heures d'utilisation.
+RESTART_DRIVER_EVERY_N_SECTORS = 30
+
+# Marqueurs d'erreur qui signifient "le driver est mort, faut le recréer"
+DEAD_DRIVER_MARKERS = (
+    "Connection refused",
+    "Max retries exceeded",
+    "NewConnectionError",
+    "invalid session id",
+    "chrome not reachable",
+    "session deleted",
+    "no such session",
+    "disconnected",
+)
+
+
+def is_dead_driver_error(exc):
+    """Détecte si une exception vient d'un driver Selenium mort/injoignable."""
+    msg = str(exc)
+    return any(marker in msg for marker in DEAD_DRIVER_MARKERS)
+
+
+def is_driver_alive(driver):
+    """Ping léger : accède à driver.current_url pour vérifier le lien webdriver."""
+    if driver is None:
+        return False
+    try:
+        _ = driver.current_url  # accès trivial qui échoue si le webdriver est mort
+        return True
+    except Exception:
+        return False
+
+
+def restart_driver(driver):
+    """Ferme proprement (best-effort) puis relance un driver neuf. Retourne le nouveau."""
+    if driver is not None:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+    print("\n♻️  Redémarrage Selenium (driver neuf)...")
+    return scraper.setup_driver()
+
+
+# ──────────────────────────────────────────────────────────────────────────
 #  Traitement d'UN secteur
 # ──────────────────────────────────────────────────────────────────────────
 def process_sector(driver, dept, secteur):
@@ -137,8 +186,9 @@ def process_sector(driver, dept, secteur):
     cleaned_name = f"{secteur_slug}.csv"
     cleaned = os.path.join(config.WORK_DIR, cleaned_name)
 
+    # Dossier db/{dept}/ créé UNIQUEMENT en cas de succès (étape 5), pour éviter
+    # de laisser des dossiers vides trompeurs quand tous les secteurs échouent.
     dept_db_dir = os.path.join(config.DB_DIR, dept)
-    os.makedirs(dept_db_dir, exist_ok=True)
     db_target = os.path.join(dept_db_dir, cleaned_name)
     db_target_tmp = db_target + ".tmp"
 
@@ -181,7 +231,8 @@ def process_sector(driver, dept, secteur):
         print(f"   ❌ {cleaned_name} manquant ou vide après cleaner.")
         return False, rows
 
-    # 5. Move atomique vers db/{dept}/{secteur}.csv
+    # 5. Move atomique vers db/{dept}/{secteur}.csv — crée le dossier maintenant
+    os.makedirs(dept_db_dir, exist_ok=True)
     shutil.copy2(cleaned, db_target_tmp)
     os.replace(db_target_tmp, db_target)
     size = os.path.getsize(db_target)
@@ -207,6 +258,7 @@ def main():
     print("=" * 64)
 
     driver = None
+    sectors_since_restart = 0
     try:
         for dept in depts:
             print("\n" + "─" * 64)
@@ -224,10 +276,23 @@ def main():
                     print(f"  ⏭️  {secteur} — en échec (relancer avec --retry-failed).")
                     continue
 
-                # Lazy start du driver Selenium
+                # A. Restart préventif toutes les N sectors — évite les fuites Chrome
+                if driver is not None and sectors_since_restart >= RESTART_DRIVER_EVERY_N_SECTORS:
+                    print(f"\n♻️  {sectors_since_restart} sectors depuis le dernier restart — recyclage.")
+                    driver = restart_driver(driver)
+                    sectors_since_restart = 0
+
+                # B. Vérif liveness — si le webdriver est mort, on le recrée
+                if driver is not None and not is_driver_alive(driver):
+                    print("\n💀 Driver Selenium mort détecté — recréation.")
+                    driver = restart_driver(driver)
+                    sectors_since_restart = 0
+
+                # C. Lazy start
                 if driver is None:
                     print("\n🚀 Démarrage Selenium...")
                     driver = scraper.setup_driver()
+                    sectors_since_restart = 0
 
                 mark_sector(progress, dept, secteur_slug, "in_progress")
 
@@ -239,12 +304,22 @@ def main():
                     else:
                         mark_sector(progress, dept, secteur_slug, "failed", rows)
                         print(f"  ⚠️ {dept}/{secteur} : échec, on continue.")
+                    sectors_since_restart += 1
                 except subprocess.CalledProcessError as e:
                     mark_sector(progress, dept, secteur_slug, "failed")
                     print(f"  ⚠️ {dept}/{secteur} : sous-script en échec ({e}).")
+                    sectors_since_restart += 1
                 except Exception as e:
                     mark_sector(progress, dept, secteur_slug, "failed")
                     print(f"  ⚠️ {dept}/{secteur} : erreur inattendue ({e}).")
+                    # Driver mort ? recréer avant le prochain sector au lieu
+                    # d'enchaîner 100 échecs identiques.
+                    if is_dead_driver_error(e) or not is_driver_alive(driver):
+                        print("  💀 Le driver semble mort — recréation avant le prochain sector.")
+                        driver = restart_driver(driver)
+                        sectors_since_restart = 0
+                    else:
+                        sectors_since_restart += 1
                 finally:
                     purge_work()
     finally:
