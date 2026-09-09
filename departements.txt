@@ -3,14 +3,44 @@
 # Tout ce qui suit après "#" est un commentaire ignoré.
 # Les lignes vides et les commentaires sont ignorés.
 #
-# Région PACA + Occitanie (sélection ciblée)
-06   # Alpes-Maritimes
-83   # Var
-04   # Alpes-de-Haute-Provence
-05   # Hautes-Alpes
-84   # Vaucluse
-13   # Bouches-du-Rhône
-32   # Gers
-81   # Tarn
-46   # Lot
-82   # Tarn-et-Garonne
+# ⚠️  Les dépts déjà scrapés (51) NE SONT PAS ici :
+# 02 04 05 06 08 09 11 12 13 14 18 21 24 27 28 30 31 32 33 34 36 37 41 45 46
+# 49 50 51 52 53 54 55 57 58 59 60 61 62 66 67 68 72 76 80 81 82 83 84 88 89 90
+#
+# ────────────── Session 2026-09-09 : 20 nouveaux dépts ──────────────
+
+# Île-de-France
+75   # Paris (forte densité)
+
+# Auvergne-Rhône-Alpes
+69   # Rhône (Lyon)
+38   # Isère (Grenoble)
+74   # Haute-Savoie (Annecy)
+73   # Savoie (tourisme)
+42   # Loire (Saint-Étienne)
+63   # Puy-de-Dôme (Clermont-Ferrand)
+
+# Pays de la Loire
+44   # Loire-Atlantique (Nantes)
+85   # Vendée
+
+# Bretagne
+35   # Ille-et-Vilaine (Rennes)
+29   # Finistère
+56   # Morbihan
+
+# Nouvelle-Aquitaine
+17   # Charente-Maritime
+64   # Pyrénées-Atlantiques (Pau)
+40   # Landes
+47   # Lot-et-Garonne
+
+# Occitanie
+65   # Hautes-Pyrénées
+
+# Bourgogne-Franche-Comté
+25   # Doubs
+71   # Saône-et-Loire
+
+# Rhône-Alpes / Sud
+26   # Drôme
