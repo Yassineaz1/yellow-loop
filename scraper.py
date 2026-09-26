@@ -140,7 +140,9 @@ class ScraperBlocked(Exception):
 
 
 # Nombre de pages consécutives sans téléphone tolérées avant d'arrêter le secteur.
-MAX_CONSECUTIVE_NO_PHONE_PAGES = 3
+# Après le passage AJAX de PagesJaunes (2026), on tolère plus large : certains
+# dépts peuvent avoir peu de fiches avec tel affiché sans que ce soit un anti-bot.
+MAX_CONSECUTIVE_NO_PHONE_PAGES = 6
 
 
 def scrape_sector(driver, department, secteur, output_file):
@@ -262,35 +264,89 @@ def scrape_sector(driver, department, secteur, output_file):
                             phone = tel_link['href'].replace("tel:", "").strip()
 
                     if not phone and i < len(sel_items):
+                        # PagesJaunes 2026 : le tel est masqué, un clic sur "Afficher le N°"
+                        # déclenche un AJAX vers /annuaire/ajax/phone_number?id=XXX qui
+                        # injecte le numéro dans <div id="bi-fantomas-XXX">.
                         try:
-                            btn_selectors = [
-                                "button.btn_tel", "button[class*='btn_tel']",
-                                "button[class*='tel']", "button[class*='phone']",
-                            ]
+                            # code_etab extrait du li id "bi-XXXXXXXX"
+                            code_etab = li_id[3:] if li_id.startswith("bi-") and li_id[3:].isdigit() else None
+
+                            # 1. Trouver le bouton (class btn_tel confirmée en 2026)
                             btn = None
-                            for sel in btn_selectors:
+                            for sel in ["button.btn_tel", "button[class*='btn_tel']"]:
                                 found = sel_items[i].find_elements(By.CSS_SELECTOR, sel)
                                 if found:
                                     btn = found[0]
                                     break
+                            # Fallback par texte
+                            if not btn:
+                                found = sel_items[i].find_elements(
+                                    By.XPATH, ".//button[contains(., 'Afficher')]"
+                                )
+                                if found:
+                                    btn = found[0]
+
                             if btn:
-                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-                                driver.execute_script("arguments[0].click();", btn)
-                                time.sleep(1.5)
-                                updated_html = sel_items[i].get_attribute("outerHTML")
-                                updated_soup = BeautifulSoup(updated_html, 'html.parser')
-                                tel_after = updated_soup.select_one("a[href^='tel:']")
-                                if tel_after:
-                                    phone = tel_after['href'].replace("tel:", "").strip()
-                                else:
-                                    phone_elem = sel_items[i].find_elements(
-                                        By.CSS_SELECTOR,
-                                        ".number-contact, .numero, [class*='numero'], a[href^='tel:']"
-                                    )
-                                    if phone_elem:
-                                        raw = phone_elem[0].get_attribute("href") or phone_elem[0].text
-                                        phone = raw.replace("tel:", "").replace("Tél :", "").strip()
-                        except:
+                                driver.execute_script(
+                                    "arguments[0].scrollIntoView({block:'center'});", btn
+                                )
+                                # Clic natif Selenium (déclenche les handlers du framework).
+                                # Fallback JS si intercepté par un overlay.
+                                try:
+                                    btn.click()
+                                except Exception:
+                                    driver.execute_script("arguments[0].click();", btn)
+
+                                # Attendre que l'AJAX peuple le div bi-fantomas
+                                if code_etab:
+                                    fantomas_id = f"bi-fantomas-{code_etab}"
+                                    try:
+                                        WebDriverWait(driver, 6).until(
+                                            lambda d: bool(
+                                                (d.find_element(By.ID, fantomas_id).text or "").strip()
+                                            )
+                                            or bool(
+                                                d.find_element(By.ID, fantomas_id).find_elements(
+                                                    By.CSS_SELECTOR, "a[href^='tel:'], .num-arcep, .number-contact"
+                                                )
+                                            )
+                                        )
+                                    except Exception:
+                                        time.sleep(2)  # fallback si le wait time out
+
+                                    # Lire directement le div fantomas peuplé
+                                    try:
+                                        fant_el = driver.find_element(By.ID, fantomas_id)
+                                        tel_link = fant_el.find_elements(By.CSS_SELECTOR, "a[href^='tel:']")
+                                        if tel_link:
+                                            phone = tel_link[0].get_attribute("href").replace("tel:", "").strip()
+                                        if not phone:
+                                            arcep = fant_el.find_elements(
+                                                By.CSS_SELECTOR, ".num-arcep, .number-contact, .num"
+                                            )
+                                            if arcep:
+                                                phone = arcep[0].text.strip()
+                                        if not phone:
+                                            txt = fant_el.text.strip()
+                                            m = re.search(r'(0[\s\.\-]?\d(?:[\s\.\-]?\d{2}){4})', txt)
+                                            if m:
+                                                phone = m.group(1).strip()
+                                    except Exception:
+                                        pass
+
+                                # Fallback : re-parse le HTML de l'item
+                                if not phone:
+                                    time.sleep(1)
+                                    updated_html = sel_items[i].get_attribute("outerHTML")
+                                    updated_soup = BeautifulSoup(updated_html, 'html.parser')
+                                    tel_after = updated_soup.select_one("a[href^='tel:']")
+                                    if tel_after:
+                                        phone = tel_after['href'].replace("tel:", "").strip()
+                                    if not phone:
+                                        m = re.search(r'(0\s?[1-9](?:[\s\.\-]?\d{2}){4})', updated_html)
+                                        if m:
+                                            phone = m.group(1).strip()
+                        except Exception:
                             pass
 
                     result = {
