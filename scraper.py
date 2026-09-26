@@ -69,6 +69,7 @@ def setup_driver():
             options=chrome_options
         )
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    driver.set_script_timeout(12)  # pour les execute_async_script (fetch phone_number)
     return driver
 
 
@@ -266,112 +267,63 @@ def scrape_sector(driver, department, secteur, output_file):
                             phone = tel_link['href'].replace("tel:", "").strip()
 
                     if not phone and i < len(sel_items):
-                        # PagesJaunes 2026 : le tel est masqué, un clic sur "Afficher le N°"
-                        # déclenche un AJAX vers /annuaire/ajax/phone_number?id=XXX qui
-                        # injecte le numéro dans <div id="bi-fantomas-XXX">.
+                        # PagesJaunes 2026 : le tel est chargé par AJAX
+                        # (GET /annuaire/ajax/phone_number?id=XXX). Le clic simulé
+                        # est filtré (isTrusted) → on appelle DIRECTEMENT l'endpoint
+                        # via fetch() dans la page : même origine, mêmes cookies,
+                        # exactement la requête que le framework aurait faite.
                         try:
-                            # code_etab extrait du li id "bi-XXXXXXXX"
                             code_etab = li_id[3:] if li_id.startswith("bi-") and li_id[3:].isdigit() else None
 
-                            # 1. Trouver le bouton (class btn_tel confirmée en 2026)
-                            btn = None
-                            for sel in ["button.btn_tel", "button[class*='btn_tel']"]:
-                                found = sel_items[i].find_elements(By.CSS_SELECTOR, sel)
-                                if found:
-                                    btn = found[0]
-                                    break
-                            # Fallback par texte
-                            if not btn:
-                                found = sel_items[i].find_elements(
-                                    By.XPATH, ".//button[contains(., 'Afficher')]"
-                                )
-                                if found:
-                                    btn = found[0]
-
-                            if btn:
-                                driver.execute_script(
-                                    "arguments[0].scrollIntoView({block:'center'});", btn
-                                )
-                                # PagesJaunes 2026 semble vérifier event.isTrusted → un
-                                # dispatchEvent JS ne suffit pas. ActionChains passe par
-                                # W3C Input Actions du webdriver → événements trusted.
-                                # Le page-load timeout court évite que Selenium bloque
-                                # sur une éventuelle nav résiduelle (submit).
-                                driver.execute_script("""
-                                    var b = arguments[0];
-                                    var form = b.closest('form');
-                                    if (form) {
-                                        form.addEventListener('submit', function(e){e.preventDefault();}, {once:true});
-                                    }
-                                """, btn)
-                                _old_pl = 300
+                            # URL AJAX : de préférence lue sur le bouton (attribut
+                            # data-pjajax), sinon reconstruite depuis code_etab.
+                            ajax_url = None
+                            btn_found = sel_items[i].find_elements(
+                                By.CSS_SELECTOR, "button.btn_tel, button[class*='btn_tel']"
+                            )
+                            if btn_found:
+                                raw_attr = btn_found[0].get_attribute("data-pjajax") or ""
                                 try:
-                                    driver.set_page_load_timeout(4)
-                                    try:
-                                        ActionChains(driver).move_to_element(btn).pause(0.2).click(btn).perform()
-                                    except TimeoutException:
-                                        pass  # submit résiduel, on continue
-                                    except Exception:
-                                        # dernier recours JS click
-                                        try:
-                                            driver.execute_script("arguments[0].click();", btn)
-                                        except Exception:
-                                            pass
-                                finally:
-                                    try:
-                                        driver.set_page_load_timeout(_old_pl)
-                                    except Exception:
-                                        pass
+                                    ajax_url = json.loads(raw_attr).get("url")
+                                except Exception:
+                                    m = re.search(r'(/annuaire/ajax/phone_number[^"\']+)', raw_attr.replace("\\/", "/"))
+                                    if m:
+                                        ajax_url = m.group(1)
+                            if not ajax_url and code_etab:
+                                ajax_url = f"/annuaire/ajax/phone_number?id={code_etab}&identifier={code_etab}"
 
-                                # Attendre que l'AJAX peuple le div bi-fantomas (5s max)
-                                if code_etab:
-                                    fantomas_id = f"bi-fantomas-{code_etab}"
-                                    try:
-                                        WebDriverWait(driver, 5).until(
-                                            lambda d: bool(
-                                                (d.find_element(By.ID, fantomas_id).text or "").strip()
-                                            )
-                                            or bool(
-                                                d.find_element(By.ID, fantomas_id).find_elements(
-                                                    By.CSS_SELECTOR, "a[href^='tel:'], .num-arcep, .number-contact"
-                                                )
-                                            )
-                                        )
-                                    except Exception:
-                                        pass  # on tente quand même la lecture ci-dessous
+                            if ajax_url:
+                                ajax_url = ajax_url.replace("\\/", "/").replace("&amp;", "&")
+                                resp = driver.execute_async_script("""
+                                    var url = arguments[0];
+                                    var done = arguments[arguments.length - 1];
+                                    fetch(url, {
+                                        credentials: 'same-origin',
+                                        headers: {'X-Requested-With': 'XMLHttpRequest'}
+                                    })
+                                    .then(function(r){ return r.text(); })
+                                    .then(function(t){ done(t); })
+                                    .catch(function(e){ done('__FETCH_ERR__' + e); });
+                                """, ajax_url)
 
-                                    # Lire directement le div fantomas peuplé
-                                    try:
-                                        fant_el = driver.find_element(By.ID, fantomas_id)
-                                        tel_link = fant_el.find_elements(By.CSS_SELECTOR, "a[href^='tel:']")
-                                        if tel_link:
-                                            phone = tel_link[0].get_attribute("href").replace("tel:", "").strip()
-                                        if not phone:
-                                            arcep = fant_el.find_elements(
-                                                By.CSS_SELECTOR, ".num-arcep, .number-contact, .num"
-                                            )
-                                            if arcep:
-                                                phone = arcep[0].text.strip()
-                                        if not phone:
-                                            txt = fant_el.text.strip()
-                                            m = re.search(r'(0[\s\.\-]?\d(?:[\s\.\-]?\d{2}){4})', txt)
-                                            if m:
-                                                phone = m.group(1).strip()
-                                    except Exception:
-                                        pass
-
-                                # Fallback : re-parse le HTML de l'item
-                                if not phone:
-                                    time.sleep(1)
-                                    updated_html = sel_items[i].get_attribute("outerHTML")
-                                    updated_soup = BeautifulSoup(updated_html, 'html.parser')
-                                    tel_after = updated_soup.select_one("a[href^='tel:']")
-                                    if tel_after:
-                                        phone = tel_after['href'].replace("tel:", "").strip()
+                                if resp and not str(resp).startswith("__FETCH_ERR__"):
+                                    text = str(resp).replace("\\/", "/")
+                                    # 1. lien tel: dans le fragment retourné
+                                    m = re.search(r'tel:([+0-9][0-9 \.\-]{7,18})', text)
+                                    if m:
+                                        phone = m.group(1).strip()
+                                    # 2. numéro FR en clair
                                     if not phone:
-                                        m = re.search(r'(0\s?[1-9](?:[\s\.\-]?\d{2}){4})', updated_html)
+                                        m = re.search(r'(0\s?[1-9](?:[\s\.\-]?\d{2}){4})', text)
                                         if m:
                                             phone = m.group(1).strip()
+                                    # 3. format international +33
+                                    if not phone:
+                                        m = re.search(r'(\+33\s?[1-9](?:[\s\.\-]?\d{2}){4})', text)
+                                        if m:
+                                            phone = m.group(1).strip()
+                                # petite pause pour ne pas mitrailler l'endpoint
+                                time.sleep(random.uniform(0.4, 1.0))
                         except Exception:
                             pass
 
