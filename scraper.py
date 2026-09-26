@@ -290,18 +290,21 @@ def scrape_sector(driver, department, secteur, output_file):
                                 driver.execute_script(
                                     "arguments[0].scrollIntoView({block:'center'});", btn
                                 )
-                                # Clic natif Selenium (déclenche les handlers du framework).
-                                # Fallback JS si intercepté par un overlay.
-                                try:
-                                    btn.click()
-                                except Exception:
-                                    driver.execute_script("arguments[0].click();", btn)
+                                # PagesJaunes utilise <button type="submit"> — btn.click() natif
+                                # attend page-load et bloque. On dispatch un vrai MouseEvent JS
+                                # qui déclenche les handlers du framework SANS attendre navigation.
+                                driver.execute_script("""
+                                    var b = arguments[0];
+                                    b.addEventListener('click', function(e){e.preventDefault();e.stopPropagation();}, {once:true, capture:true});
+                                    var evt = new MouseEvent('click', {bubbles:true, cancelable:true, view:window});
+                                    b.dispatchEvent(evt);
+                                """, btn)
 
-                                # Attendre que l'AJAX peuple le div bi-fantomas
+                                # Attendre que l'AJAX peuple le div bi-fantomas (timeout court)
                                 if code_etab:
                                     fantomas_id = f"bi-fantomas-{code_etab}"
                                     try:
-                                        WebDriverWait(driver, 6).until(
+                                        WebDriverWait(driver, 3).until(
                                             lambda d: bool(
                                                 (d.find_element(By.ID, fantomas_id).text or "").strip()
                                             )
@@ -312,7 +315,7 @@ def scrape_sector(driver, department, secteur, output_file):
                                             )
                                         )
                                     except Exception:
-                                        time.sleep(2)  # fallback si le wait time out
+                                        pass  # on continue, l'extraction ci-dessous gère l'absence
 
                                     # Lire directement le div fantomas peuplé
                                     try:
