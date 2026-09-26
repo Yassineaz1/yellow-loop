@@ -17,8 +17,10 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 from bs4 import BeautifulSoup
 import shutil
 
@@ -290,20 +292,36 @@ def scrape_sector(driver, department, secteur, output_file):
                                 driver.execute_script(
                                     "arguments[0].scrollIntoView({block:'center'});", btn
                                 )
-                                # PagesJaunes 2026 : bouton type="submit" → btn.click() natif
-                                # bloque en attendant page-load. On dispatch un vrai MouseEvent
-                                # JS qui déclenche les handlers PJ (AJAX) SANS bloquer.
-                                # Le preventDefault est en phase BUBBLE (après handlers PJ)
-                                # pour ne PAS bloquer l'AJAX du framework.
+                                # PagesJaunes 2026 semble vérifier event.isTrusted → un
+                                # dispatchEvent JS ne suffit pas. ActionChains passe par
+                                # W3C Input Actions du webdriver → événements trusted.
+                                # Le page-load timeout court évite que Selenium bloque
+                                # sur une éventuelle nav résiduelle (submit).
                                 driver.execute_script("""
                                     var b = arguments[0];
                                     var form = b.closest('form');
                                     if (form) {
                                         form.addEventListener('submit', function(e){e.preventDefault();}, {once:true});
                                     }
-                                    var evt = new MouseEvent('click', {bubbles:true, cancelable:true, view:window});
-                                    b.dispatchEvent(evt);
                                 """, btn)
+                                _old_pl = 300
+                                try:
+                                    driver.set_page_load_timeout(4)
+                                    try:
+                                        ActionChains(driver).move_to_element(btn).pause(0.2).click(btn).perform()
+                                    except TimeoutException:
+                                        pass  # submit résiduel, on continue
+                                    except Exception:
+                                        # dernier recours JS click
+                                        try:
+                                            driver.execute_script("arguments[0].click();", btn)
+                                        except Exception:
+                                            pass
+                                finally:
+                                    try:
+                                        driver.set_page_load_timeout(_old_pl)
+                                    except Exception:
+                                        pass
 
                                 # Attendre que l'AJAX peuple le div bi-fantomas (5s max)
                                 if code_etab:
