@@ -290,21 +290,26 @@ def scrape_sector(driver, department, secteur, output_file):
                                 driver.execute_script(
                                     "arguments[0].scrollIntoView({block:'center'});", btn
                                 )
-                                # PagesJaunes utilise <button type="submit"> — btn.click() natif
-                                # attend page-load et bloque. On dispatch un vrai MouseEvent JS
-                                # qui déclenche les handlers du framework SANS attendre navigation.
+                                # PagesJaunes 2026 : bouton type="submit" → btn.click() natif
+                                # bloque en attendant page-load. On dispatch un vrai MouseEvent
+                                # JS qui déclenche les handlers PJ (AJAX) SANS bloquer.
+                                # Le preventDefault est en phase BUBBLE (après handlers PJ)
+                                # pour ne PAS bloquer l'AJAX du framework.
                                 driver.execute_script("""
                                     var b = arguments[0];
-                                    b.addEventListener('click', function(e){e.preventDefault();e.stopPropagation();}, {once:true, capture:true});
+                                    var form = b.closest('form');
+                                    if (form) {
+                                        form.addEventListener('submit', function(e){e.preventDefault();}, {once:true});
+                                    }
                                     var evt = new MouseEvent('click', {bubbles:true, cancelable:true, view:window});
                                     b.dispatchEvent(evt);
                                 """, btn)
 
-                                # Attendre que l'AJAX peuple le div bi-fantomas (timeout court)
+                                # Attendre que l'AJAX peuple le div bi-fantomas (5s max)
                                 if code_etab:
                                     fantomas_id = f"bi-fantomas-{code_etab}"
                                     try:
-                                        WebDriverWait(driver, 3).until(
+                                        WebDriverWait(driver, 5).until(
                                             lambda d: bool(
                                                 (d.find_element(By.ID, fantomas_id).text or "").strip()
                                             )
@@ -315,7 +320,7 @@ def scrape_sector(driver, department, secteur, output_file):
                                             )
                                         )
                                     except Exception:
-                                        pass  # on continue, l'extraction ci-dessous gère l'absence
+                                        pass  # on tente quand même la lecture ci-dessous
 
                                     # Lire directement le div fantomas peuplé
                                     try:
