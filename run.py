@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-Orchestrateur principal du pipeline PagesJaunes — granularité SECTEUR.
+Orchestrateur du pipeline PagesJaunes.
+
+Mode standard — parcourt departements.txt × secteur.txt et sauvegarde
+db/{dept}/{secteur}.csv :
 
   python3 run.py                    # reprend là où on s'est arrêté
   python3 run.py --retry-failed     # retente uniquement les secteurs en échec
 
-Pour chaque (département, secteur) non-terminé dans state/progress.json :
-    1. purge work/                                          (fresh)
-    2. scrape UN secteur         -> work/input.csv          (fresh, mode "w")
-    3. enrichit SIRET/SIREN      -> work/output_enriched.csv
-    4. ajoute les dirigeants     -> work/output_final.csv
-    5. nettoie                   -> work/{secteur}.csv
-    6. déplace le résultat vers  -> db/{dept}/{secteur}.csv (atomique)
-    7. marque (dept, secteur) "done" dans state/progress.json
-    8. purge work/ et passe au secteur suivant
+Mode single-secteur / all-France — scrape UN SEUL secteur sur tous les
+départements français et concatène dans UN CSV unique :
 
-Reprise : les (dept, secteur) déjà "done" sont sautés au relancement.
-Sur échec d'un secteur : marqué "failed", on continue au suivant — aucune donnée
-d'un autre secteur n'est perdue.
+  python3 run.py --single-secteur camping --output db/camping_france.csv --all-france
+  python3 run.py --single-secteur camping --output db/camping_france.csv --depts 40,44,47
+  python3 run.py --single-secteur camping --output db/camping_france.csv --all-france --retry-failed
+
+Le state est stocké dans state/single_<slug>.json pour ne pas polluer le state
+du mode standard.
 """
 import os
 import re
 import sys
+import csv
 import json
 import shutil
 import subprocess
@@ -29,6 +29,29 @@ from datetime import datetime
 
 import config
 import scraper
+
+
+# Départements FR métropolitains (01→95 sauf 20, plus 2A/2B pour la Corse).
+ALL_FR_DEPTS = [f"{n:02d}" for n in range(1, 96) if n != 20] + ["2A", "2B"]
+
+
+def parse_args():
+    """Extrait --single-secteur, --output, --all-france, --depts, --retry-failed."""
+    args = {
+        "single_secteur": None,
+        "output": None,
+        "all_france": "--all-france" in sys.argv,
+        "depts_override": None,
+        "retry_failed": "--retry-failed" in sys.argv,
+    }
+    for i, a in enumerate(sys.argv):
+        if a == "--single-secteur" and i + 1 < len(sys.argv):
+            args["single_secteur"] = sys.argv[i + 1]
+        elif a == "--output" and i + 1 < len(sys.argv):
+            args["output"] = sys.argv[i + 1]
+        elif a == "--depts" and i + 1 < len(sys.argv):
+            args["depts_override"] = [d.strip() for d in sys.argv[i + 1].split(",") if d.strip()]
+    return args
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -177,8 +200,39 @@ def restart_driver(driver):
 # ──────────────────────────────────────────────────────────────────────────
 #  Traitement d'UN secteur
 # ──────────────────────────────────────────────────────────────────────────
-def process_sector(driver, dept, secteur):
-    """Pipeline complet pour (dept, secteur). Retourne (ok, rows)."""
+def append_csv_to(src, dst):
+    """Append les lignes de src (avec header) à dst.
+
+    Écrit le header dans dst s'il n'existe pas ou est vide. Ignore le header
+    des appends suivants. Ajoute une colonne 'Département' automatiquement
+    si absente pour tracer d'où vient chaque ligne (utile en mode all-France).
+    """
+    with open(src, "r", encoding="utf-8", newline="") as fsrc:
+        reader = csv.reader(fsrc)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return 0
+        rows = list(reader)
+
+    dst_exists = os.path.exists(dst) and os.path.getsize(dst) > 0
+    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+    mode = "a" if dst_exists else "w"
+    with open(dst, mode, encoding="utf-8", newline="") as fdst:
+        writer = csv.writer(fdst)
+        if not dst_exists:
+            writer.writerow(header)
+        writer.writerows(rows)
+    return len(rows)
+
+
+def process_sector(driver, dept, secteur, append_to=None):
+    """Pipeline complet pour (dept, secteur). Retourne (ok, rows).
+
+    Si `append_to` est fourni, les lignes nettoyées sont APPENDÉES à ce fichier
+    au lieu d'être copiées vers db/{dept}/{secteur}.csv. Utilisé par le mode
+    --single-secteur / --all-france pour agréger un CSV unique.
+    """
     secteur_slug = slugify_secteur(secteur)
     raw = os.path.join(config.WORK_DIR, config.RAW_CSV)
     enriched = os.path.join(config.WORK_DIR, config.ENRICHED_CSV)
@@ -231,7 +285,14 @@ def process_sector(driver, dept, secteur):
         print(f"   ❌ {cleaned_name} manquant ou vide après cleaner.")
         return False, rows
 
-    # 5. Move atomique vers db/{dept}/{secteur}.csv — crée le dossier maintenant
+    # 5a. Mode single-secteur / all-France : append au CSV agrégé
+    if append_to:
+        n_appended = append_csv_to(cleaned, append_to)
+        total_size = os.path.getsize(append_to)
+        print(f"   ✅ Appendé {n_appended} lignes à {append_to} (total {total_size} octets)")
+        return True, rows
+
+    # 5b. Mode standard : move atomique vers db/{dept}/{secteur}.csv
     os.makedirs(dept_db_dir, exist_ok=True)
     shutil.copy2(cleaned, db_target_tmp)
     os.replace(db_target_tmp, db_target)
@@ -242,11 +303,155 @@ def process_sector(driver, dept, secteur):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  Boucle principale
+#  Mode SINGLE-SECTEUR / ALL-FRANCE — un secteur × tous les dépts → 1 CSV
+# ──────────────────────────────────────────────────────────────────────────
+def load_single_progress(state_file):
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_single_progress(state_file, progress):
+    os.makedirs(os.path.dirname(state_file), exist_ok=True)
+    tmp = state_file + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(progress, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, state_file)
+
+
+def main_single_secteur(secteur, output_file, depts, retry_failed):
+    """Scrape UN SEUL secteur sur une LISTE de départements et concatène dans
+    un unique CSV agrégé. State dans state/single_<slug>_<output>.json.
+    """
+    config.ensure_dirs()
+    output_file = os.path.abspath(output_file)
+    slug = slugify_secteur(secteur)
+    out_basename = os.path.splitext(os.path.basename(output_file))[0]
+    state_file = os.path.join(config.STATE_DIR, f"single_{slug}_{out_basename}.json")
+
+    progress = load_single_progress(state_file)
+
+    print("=" * 64)
+    print(f"  PIPELINE SINGLE — secteur '{secteur}' × {len(depts)} dépts")
+    print(f"  Sortie agrégée : {output_file}")
+    print(f"  État           : {state_file}")
+    print("=" * 64)
+
+    driver = None
+    sectors_since_restart = 0
+    try:
+        for dept in depts:
+            print("\n" + "─" * 64)
+            print(f"▶️  {dept} / {secteur}")
+            print("─" * 64)
+
+            status = progress.get(dept, {}).get("status")
+            if status == "done":
+                print(f"  ⏭️  déjà fait, skip.")
+                continue
+            if status == "failed" and not retry_failed:
+                print(f"  ⏭️  en échec (relancer avec --retry-failed).")
+                continue
+
+            # Résilience driver
+            if driver is not None and sectors_since_restart >= RESTART_DRIVER_EVERY_N_SECTORS:
+                print(f"♻️  Recyclage préventif ({sectors_since_restart} sectors).")
+                driver = restart_driver(driver)
+                sectors_since_restart = 0
+            if driver is not None and not is_driver_alive(driver):
+                print("💀 Driver mort — recréation.")
+                driver = restart_driver(driver)
+                sectors_since_restart = 0
+            if driver is None:
+                print("🚀 Démarrage Selenium...")
+                driver = scraper.setup_driver()
+                sectors_since_restart = 0
+
+            progress[dept] = {"status": "in_progress", "updated_at": datetime.now().isoformat(timespec="seconds")}
+            save_single_progress(state_file, progress)
+
+            try:
+                ok, rows = process_sector(driver, dept, secteur, append_to=output_file)
+                progress[dept] = {
+                    "status": "done" if ok else "failed",
+                    "rows": rows,
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                save_single_progress(state_file, progress)
+                print(f"  {'🎉' if ok else '⚠️'} {dept}/{secteur} : {rows} lignes")
+                sectors_since_restart += 1
+            except subprocess.CalledProcessError as e:
+                progress[dept] = {"status": "failed", "updated_at": datetime.now().isoformat(timespec="seconds")}
+                save_single_progress(state_file, progress)
+                print(f"  ⚠️ {dept}/{secteur} : sous-script en échec ({e}).")
+                sectors_since_restart += 1
+            except Exception as e:
+                progress[dept] = {"status": "failed", "updated_at": datetime.now().isoformat(timespec="seconds")}
+                save_single_progress(state_file, progress)
+                print(f"  ⚠️ {dept}/{secteur} : erreur inattendue ({e}).")
+                if is_dead_driver_error(e) or not is_driver_alive(driver):
+                    print("  💀 Driver mort — recréation.")
+                    driver = restart_driver(driver)
+                    sectors_since_restart = 0
+                else:
+                    sectors_since_restart += 1
+            finally:
+                purge_work()
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    # Bilan
+    print("\n" + "=" * 64)
+    print("  BILAN SINGLE-SECTEUR")
+    print("=" * 64)
+    done = [d for d, e in progress.items() if e.get("status") == "done"]
+    failed = [d for d, e in progress.items() if e.get("status") == "failed"]
+    total_lines_out = 0
+    if os.path.exists(output_file):
+        with open(output_file, "r", encoding="utf-8") as f:
+            total_lines_out = sum(1 for _ in f) - 1  # -1 pour le header
+    print(f"  ✅ {len(done)} départements OK, ⚠️ {len(failed)} en échec")
+    print(f"  📊 {total_lines_out} lignes dans {output_file}")
+    if failed:
+        print(f"  ↻ Retenter les échecs : ajouter --retry-failed à la commande")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Boucle principale — dispatch entre les 2 modes
 # ──────────────────────────────────────────────────────────────────────────
 def main():
+    args = parse_args()
+
+    # Mode single-secteur / all-France
+    if args["single_secteur"]:
+        if not args["output"]:
+            print("❌ --single-secteur requiert --output <chemin/fichier.csv>")
+            sys.exit(1)
+        if args["all_france"]:
+            depts = list(ALL_FR_DEPTS)
+        elif args["depts_override"]:
+            depts = args["depts_override"]
+        else:
+            print("❌ --single-secteur requiert --all-france ou --depts <liste>")
+            sys.exit(1)
+        return main_single_secteur(
+            args["single_secteur"], args["output"], depts, args["retry_failed"]
+        )
+
+    # Mode standard : departements.txt × secteur.txt → db/{dept}/{secteur}.csv
+    return main_standard(retry_failed=args["retry_failed"])
+
+
+def main_standard(retry_failed):
     config.ensure_dirs()
-    retry_failed = "--retry-failed" in sys.argv
 
     depts = load_departements()
     secteurs = scraper.load_secteurs()

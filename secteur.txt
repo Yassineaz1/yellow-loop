@@ -1,16 +1,13 @@
-hotel 
-camping 
-auberge 
-restaurant 
+hotel
+auberge
+restaurant
 boulangerie
-pharmacie 
-camping 
-auberge 
+pharmacie
 agriculteurs
 elevages
-pepiniere 
-jardinerie 
+pepiniere
+jardinerie
 ateliers
-café 
-bar 
+café
+bar
 salle de sport
