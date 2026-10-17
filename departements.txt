@@ -9,8 +9,8 @@
 #     séparément en mode all-France (db/camping_france.csv).
 #
 # ────────────── Vague 1 (14 dépts) — Sud-Ouest / Auvergne-RA ──────────────
-40   # Landes
-44   # Loire-Atlantique
+# 40   # Landes            — fait (run du 2026-10), skip
+# 44   # Loire-Atlantique  — fait (run du 2026-10), skip
 47   # Lot-et-Garonne
 16   # Charente
 79   # Deux-Sèvres
