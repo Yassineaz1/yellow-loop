@@ -7,7 +7,7 @@ agriculteurs
 elevages
 pepiniere
 jardinerie
-ateliers
 café
 bar
 salle de sport
+maison de retraite

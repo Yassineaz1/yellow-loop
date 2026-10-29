@@ -12,6 +12,7 @@ import re
 import random
 import base64
 import json
+from urllib.parse import quote_plus
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -134,6 +135,32 @@ def load_secteurs(secteur_file=None):
     return secteurs
 
 
+def wait_for_results(driver, timeout):
+    """Attend qu'au moins une fiche (li.bi) soit dans la page. True si trouvée."""
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "li.bi"))
+        )
+        return True
+    except TimeoutException:
+        return False
+
+
+def save_debug_page(driver, department, secteur):
+    """Sauvegarde la page sans résultat dans state/ pour diagnostic."""
+    try:
+        slug = re.sub(r'[^\w]+', '_', secteur.strip().lower()).strip('_')
+        path = os.path.join(config.STATE_DIR, f"debug_{department}_{slug}.html")
+        os.makedirs(config.STATE_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(driver.page_source or "")
+        print(f"  🔎 Page sans résultat — titre: '{(driver.title or '')[:80]}'")
+        print(f"     URL: {driver.current_url[:150]}")
+        print(f"     HTML sauvegardé: {path}")
+    except Exception as e:
+        print(f"  ⚠️ Diagnostic impossible: {e}")
+
+
 class ScraperBlocked(Exception):
     """Levée quand PagesJaunes a probablement changé son HTML ou déclenché un anti-bot.
 
@@ -183,6 +210,18 @@ def scrape_sector(driver, department, secteur, output_file):
         o_input.send_keys(department)
         random_sleep(0.5, 1.5)
         driver.execute_script("arguments[0].click();", submit)
+
+        # Certains secteurs (hôtels...) passent par un écran de chargement
+        # "PagesJaunes lance votre recherche" avant d'afficher la liste.
+        if not wait_for_results(driver, 25):
+            print("  ⏳ Liste non affichée après la recherche — tentative par URL directe...")
+            driver.get(
+                "https://www.pagesjaunes.fr/annuaire/chercherlespros?quoiqui="
+                f"{quote_plus(secteur)}&ou={quote_plus(department)}"
+            )
+            handle_cookie_banner(driver)
+            if not wait_for_results(driver, 25):
+                save_debug_page(driver, department, secteur)
 
         page_num = 1
         while True:
