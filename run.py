@@ -15,8 +15,14 @@ départements français et concatène dans UN CSV unique :
   python3 run.py --single-secteur camping --output db/camping_france.csv --depts 40,44,47
   python3 run.py --single-secteur camping --output db/camping_france.csv --all-france --retry-failed
 
-Le state est stocké dans state/single_<slug>.json pour ne pas polluer le state
-du mode standard.
+Plusieurs secteurs dans un même CSV (séparés par des virgules), avec filtre
+"indépendants hors centre-ville" appliqué avant l'enrichissement :
+
+  python3 run.py --single-secteur "hotel,auberge,chambre d'hôtes" \\
+      --output db/hebergements_hors_centre_france.csv --all-france --filtre-hors-centre
+
+Le state est stocké dans state/single_<fichier>.json pour ne pas polluer le
+state du mode standard.
 """
 import os
 import re
@@ -29,6 +35,7 @@ from datetime import datetime
 
 import config
 import scraper
+import filters
 
 
 # Départements FR métropolitains (01→95 sauf 20, plus 2A/2B pour la Corse).
@@ -43,6 +50,7 @@ def parse_args():
         "all_france": "--all-france" in sys.argv,
         "depts_override": None,
         "retry_failed": "--retry-failed" in sys.argv,
+        "filtre_hors_centre": "--filtre-hors-centre" in sys.argv,
     }
     for i, a in enumerate(sys.argv):
         if a == "--single-secteur" and i + 1 < len(sys.argv):
@@ -226,12 +234,15 @@ def append_csv_to(src, dst):
     return len(rows)
 
 
-def process_sector(driver, dept, secteur, append_to=None):
+def process_sector(driver, dept, secteur, append_to=None, row_filter=None):
     """Pipeline complet pour (dept, secteur). Retourne (ok, rows).
 
     Si `append_to` est fourni, les lignes nettoyées sont APPENDÉES à ce fichier
     au lieu d'être copiées vers db/{dept}/{secteur}.csv. Utilisé par le mode
     --single-secteur / --all-france pour agréger un CSV unique.
+
+    `row_filter(raw_csv) -> nb_lignes_gardées` est appliqué juste après le
+    scraping, avant l'enrichissement (qui est l'étape lente).
     """
     secteur_slug = slugify_secteur(secteur)
     raw = os.path.join(config.WORK_DIR, config.RAW_CSV)
@@ -258,6 +269,11 @@ def process_sector(driver, dept, secteur, append_to=None):
     if rows == 0 or not os.path.exists(raw):
         print(f"   ⚠️ 0 ligne scrapée pour {secteur}/{dept}.")
         return False, 0
+
+    if row_filter:
+        if row_filter(raw) == 0:
+            print(f"   ✅ Aucune fiche retenue après filtre pour {secteur}/{dept} — rien à enrichir.")
+            return True, rows
 
     # 2. Enrichissement SIRET
     print(f"\n[2/4] 🏢 Enrichissement SIRET/SIREN...")
@@ -323,20 +339,33 @@ def save_single_progress(state_file, progress):
     os.replace(tmp, state_file)
 
 
-def main_single_secteur(secteur, output_file, depts, retry_failed):
-    """Scrape UN SEUL secteur sur une LISTE de départements et concatène dans
-    un unique CSV agrégé. State dans state/single_<slug>_<output>.json.
+def main_single_secteur(secteurs_arg, output_file, depts, retry_failed, filtre_hors_centre=False):
+    """Scrape un ou plusieurs secteurs (séparés par des virgules) sur une LISTE
+    de départements et concatène tout dans un unique CSV agrégé.
     """
     config.ensure_dirs()
     output_file = os.path.abspath(output_file)
-    slug = slugify_secteur(secteur)
+    secteurs = [s.strip() for s in secteurs_arg.split(",") if s.strip()]
     out_basename = os.path.splitext(os.path.basename(output_file))[0]
-    state_file = os.path.join(config.STATE_DIR, f"single_{slug}_{out_basename}.json")
+    if len(secteurs) == 1:
+        state_file = os.path.join(config.STATE_DIR, f"single_{slugify_secteur(secteurs[0])}_{out_basename}.json")
+    else:
+        state_file = os.path.join(config.STATE_DIR, f"single_multi_{out_basename}.json")
 
     progress = load_single_progress(state_file)
 
+    row_filter = None
+    seen_keys = set()
+    if filtre_hors_centre:
+        seen_keys = filters.load_seen_keys(output_file)
+        row_filter = lambda raw: filters.filter_independent_outskirts(raw, seen_keys)
+
+    units = [(d, s) for d in depts for s in secteurs]
+
     print("=" * 64)
-    print(f"  PIPELINE SINGLE — secteur '{secteur}' × {len(depts)} dépts")
+    print(f"  PIPELINE SINGLE — {len(secteurs)} secteur(s) × {len(depts)} dépts = {len(units)} unités")
+    print(f"  Secteurs       : {', '.join(secteurs)}")
+    print(f"  Filtre         : {'indépendants hors centre-ville' if filtre_hors_centre else 'aucun'}")
     print(f"  Sortie agrégée : {output_file}")
     print(f"  État           : {state_file}")
     print("=" * 64)
@@ -344,12 +373,14 @@ def main_single_secteur(secteur, output_file, depts, retry_failed):
     driver = None
     sectors_since_restart = 0
     try:
-        for dept in depts:
+        for dept, secteur in units:
+            # Clé de state : dept seul en mono-secteur (compat camping), dept/secteur sinon
+            key = dept if len(secteurs) == 1 else f"{dept}/{slugify_secteur(secteur)}"
             print("\n" + "─" * 64)
             print(f"▶️  {dept} / {secteur}")
             print("─" * 64)
 
-            status = progress.get(dept, {}).get("status")
+            status = progress.get(key, {}).get("status")
             if status == "done":
                 print(f"  ⏭️  déjà fait, skip.")
                 continue
@@ -371,26 +402,31 @@ def main_single_secteur(secteur, output_file, depts, retry_failed):
                 driver = scraper.setup_driver()
                 sectors_since_restart = 0
 
-            progress[dept] = {"status": "in_progress", "updated_at": datetime.now().isoformat(timespec="seconds")}
+            progress[key] = {"status": "in_progress", "updated_at": datetime.now().isoformat(timespec="seconds")}
             save_single_progress(state_file, progress)
 
             try:
-                ok, rows = process_sector(driver, dept, secteur, append_to=output_file)
-                progress[dept] = {
+                ok, rows = process_sector(driver, dept, secteur, append_to=output_file,
+                                          row_filter=row_filter)
+                progress[key] = {
                     "status": "done" if ok else "failed",
                     "rows": rows,
                     "updated_at": datetime.now().isoformat(timespec="seconds"),
                 }
                 save_single_progress(state_file, progress)
-                print(f"  {'🎉' if ok else '⚠️'} {dept}/{secteur} : {rows} lignes")
+                print(f"  {'🎉' if ok else '⚠️'} {dept}/{secteur} : {rows} lignes brutes")
+                if ok and filtre_hors_centre:
+                    # dédoublonnage inter-secteurs : un hôtel peut sortir aussi en "auberge"
+                    seen_keys.clear()
+                    seen_keys.update(filters.load_seen_keys(output_file))
                 sectors_since_restart += 1
             except subprocess.CalledProcessError as e:
-                progress[dept] = {"status": "failed", "updated_at": datetime.now().isoformat(timespec="seconds")}
+                progress[key] = {"status": "failed", "updated_at": datetime.now().isoformat(timespec="seconds")}
                 save_single_progress(state_file, progress)
                 print(f"  ⚠️ {dept}/{secteur} : sous-script en échec ({e}).")
                 sectors_since_restart += 1
             except Exception as e:
-                progress[dept] = {"status": "failed", "updated_at": datetime.now().isoformat(timespec="seconds")}
+                progress[key] = {"status": "failed", "updated_at": datetime.now().isoformat(timespec="seconds")}
                 save_single_progress(state_file, progress)
                 print(f"  ⚠️ {dept}/{secteur} : erreur inattendue ({e}).")
                 if is_dead_driver_error(e) or not is_driver_alive(driver):
@@ -416,9 +452,9 @@ def main_single_secteur(secteur, output_file, depts, retry_failed):
     failed = [d for d, e in progress.items() if e.get("status") == "failed"]
     total_lines_out = 0
     if os.path.exists(output_file):
-        with open(output_file, "r", encoding="utf-8") as f:
-            total_lines_out = sum(1 for _ in f) - 1  # -1 pour le header
-    print(f"  ✅ {len(done)} départements OK, ⚠️ {len(failed)} en échec")
+        with open(output_file, "r", encoding="utf-8", newline="") as f:
+            total_lines_out = sum(1 for _ in csv.reader(f)) - 1  # -1 pour le header
+    print(f"  ✅ {len(done)} unités OK, ⚠️ {len(failed)} en échec")
     print(f"  📊 {total_lines_out} lignes dans {output_file}")
     if failed:
         print(f"  ↻ Retenter les échecs : ajouter --retry-failed à la commande")
@@ -443,7 +479,8 @@ def main():
             print("❌ --single-secteur requiert --all-france ou --depts <liste>")
             sys.exit(1)
         return main_single_secteur(
-            args["single_secteur"], args["output"], depts, args["retry_failed"]
+            args["single_secteur"], args["output"], depts, args["retry_failed"],
+            filtre_hors_centre=args["filtre_hors_centre"],
         )
 
     # Mode standard : departements.txt × secteur.txt → db/{dept}/{secteur}.csv
