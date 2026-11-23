@@ -21,6 +21,11 @@ Plusieurs secteurs dans un même CSV (séparés par des virgules), avec filtre
   python3 run.py --single-secteur "hotel,auberge,chambre d'hôtes" \\
       --output db/hebergements_hors_centre_france.csv --all-france --filtre-hors-centre
 
+Maisons de retraite + EHPAD (sans MJC, crèches, aides à domicile...) :
+
+  python3 run.py --single-secteur "maison de retraite,ehpad" \\
+      --output db/maisons_retraite_ehpad_france.csv --all-france --filtre-seniors
+
 Le state est stocké dans state/single_<fichier>.json pour ne pas polluer le
 state du mode standard.
 """
@@ -51,6 +56,7 @@ def parse_args():
         "depts_override": None,
         "retry_failed": "--retry-failed" in sys.argv,
         "filtre_hors_centre": "--filtre-hors-centre" in sys.argv,
+        "filtre_seniors": "--filtre-seniors" in sys.argv,
     }
     for i, a in enumerate(sys.argv):
         if a == "--single-secteur" and i + 1 < len(sys.argv):
@@ -339,7 +345,8 @@ def save_single_progress(state_file, progress):
     os.replace(tmp, state_file)
 
 
-def main_single_secteur(secteurs_arg, output_file, depts, retry_failed, filtre_hors_centre=False):
+def main_single_secteur(secteurs_arg, output_file, depts, retry_failed, filtre_hors_centre=False,
+                        filtre_seniors=False):
     """Scrape un ou plusieurs secteurs (séparés par des virgules) sur une LISTE
     de départements et concatène tout dans un unique CSV agrégé.
     """
@@ -359,13 +366,22 @@ def main_single_secteur(secteurs_arg, output_file, depts, retry_failed, filtre_h
     if filtre_hors_centre:
         seen_keys = filters.load_seen_keys(output_file)
         row_filter = lambda raw: filters.filter_independent_outskirts(raw, seen_keys)
+    elif filtre_seniors:
+        seen_keys = filters.load_seen_keys(output_file)
+        row_filter = lambda raw: filters.filter_senior_housing(raw, seen_keys)
+    if filtre_hors_centre:
+        filtre_label = "indépendants hors centre-ville"
+    elif filtre_seniors:
+        filtre_label = "maisons de retraite / EHPAD"
+    else:
+        filtre_label = "aucun"
 
     units = [(d, s) for d in depts for s in secteurs]
 
     print("=" * 64)
     print(f"  PIPELINE SINGLE — {len(secteurs)} secteur(s) × {len(depts)} dépts = {len(units)} unités")
     print(f"  Secteurs       : {', '.join(secteurs)}")
-    print(f"  Filtre         : {'indépendants hors centre-ville' if filtre_hors_centre else 'aucun'}")
+    print(f"  Filtre         : {filtre_label}")
     print(f"  Sortie agrégée : {output_file}")
     print(f"  État           : {state_file}")
     print("=" * 64)
@@ -415,8 +431,9 @@ def main_single_secteur(secteurs_arg, output_file, depts, retry_failed, filtre_h
                 }
                 save_single_progress(state_file, progress)
                 print(f"  {'🎉' if ok else '⚠️'} {dept}/{secteur} : {rows} lignes brutes")
-                if ok and filtre_hors_centre:
-                    # dédoublonnage inter-secteurs : un hôtel peut sortir aussi en "auberge"
+                if ok and row_filter:
+                    # dédoublonnage inter-secteurs : un hôtel peut sortir aussi en "auberge",
+                    # un EHPAD aussi en "maison de retraite"
                     seen_keys.clear()
                     seen_keys.update(filters.load_seen_keys(output_file))
                 sectors_since_restart += 1
@@ -481,6 +498,7 @@ def main():
         return main_single_secteur(
             args["single_secteur"], args["output"], depts, args["retry_failed"],
             filtre_hors_centre=args["filtre_hors_centre"],
+            filtre_seniors=args["filtre_seniors"],
         )
 
     # Mode standard : departements.txt × secteur.txt → db/{dept}/{secteur}.csv

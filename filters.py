@@ -164,6 +164,56 @@ def load_seen_keys(output_file):
     return seen
 
 
+# ──────────────────────────────────────────────────────────────────────────
+#  Filtre "maisons de retraite / EHPAD"
+# ──────────────────────────────────────────────────────────────────────────
+# PagesJaunes mélange des maisons des jeunes (MJC), crèches, aides à domicile...
+# dans les résultats "maison de retraite" : on ne garde que l'hébergement seniors.
+_SENIOR_RE = re.compile(
+    r"retraite|ehpad|e\.h\.p\.a\.d|senior|personnes agees|gerontolog|"
+    r"foyers?[- ]logements?|residences? autonomie|usld|soins de longue duree"
+)
+_NOT_SENIOR_RE = re.compile(r"jeunes|jeunesse|\bmjc\b|enfan|creche|domicile|caisse de retraite")
+
+
+def is_senior_housing(row):
+    activite = _norm(row.get("Activité", ""))
+    nom = _norm(row.get("Nom de l'entreprise", ""))
+    if _NOT_SENIOR_RE.search(activite) or _NOT_SENIOR_RE.search(nom):
+        return False
+    return bool(_SENIOR_RE.search(activite) or _SENIOR_RE.search(nom))
+
+
+def filter_senior_housing(raw_csv, seen_keys):
+    """Garde seulement les maisons de retraite / EHPAD, sans doublons. Retourne le nb gardé."""
+    with open(raw_csv, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+
+    kept, batch_keys = [], set()
+    hors_sujet = doublons = 0
+    for row in rows:
+        if not is_senior_housing(row):
+            hors_sujet += 1
+            continue
+        key = row_key(row)
+        if key in seen_keys or key in batch_keys:
+            doublons += 1
+            continue
+        kept.append(row)
+        batch_keys.add(key)
+
+    with open(raw_csv, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(kept)
+
+    print(f"   👵 Filtre retraite/EHPAD : {len(rows)} fiches → {len(kept)} gardées "
+          f"(hors sujet {hors_sujet}, doublons {doublons})")
+    return len(kept)
+
+
 def filter_independent_outskirts(raw_csv, seen_keys):
     """Filtre raw_csv en place. Retourne le nombre de lignes gardées."""
     with open(raw_csv, "r", encoding="utf-8-sig", newline="") as f:
